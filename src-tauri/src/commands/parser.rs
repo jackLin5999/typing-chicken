@@ -261,7 +261,8 @@ pub fn parse_epub_internal(
 
 /// Parse a TXT file — infer chapter breaks from common patterns.
 pub fn parse_txt_internal(file_path: &str) -> Result<(String, String, Vec<ParsedChapter>, Option<String>), String> {
-    let content = fs::read_to_string(file_path).map_err(|e| e.to_string())?;
+    let bytes = fs::read(file_path).map_err(|e| e.to_string())?;
+    let content = decode_text(&bytes);
 
     let title = Path::new(file_path)
         .file_stem()
@@ -274,6 +275,61 @@ pub fn parse_txt_internal(file_path: &str) -> Result<(String, String, Vec<Parsed
     let chapters = split_into_chapters(&content);
 
     Ok((title, author, chapters, None))
+}
+
+/// Decode a text file into a String, tolerating non-UTF-8 encodings.
+///
+/// `fs::read_to_string` accepts valid UTF-8 and nothing else, which rules out
+/// most Chinese e-books: the majority of the ones people actually download
+/// ship as GB18030/GBK, and one saved from Notepad as "Unicode" is UTF-16.
+/// Both used to fail the import outright.
+///
+/// Order of attempts:
+///   1. Byte-order mark — an explicit declaration, so it beats any guess.
+///   2. Strict UTF-8 — the common case, and strict so we can tell it failed.
+///   3. GB18030 — per the WHATWG standard it decodes *every* byte sequence, so
+///      it cannot fail; it is a strict superset of GBK and GB2312.
+///   4. Windows-1252 — if step 3 produced no CJK at all, the file was probably
+///      Western European rather than Chinese and step 3 made mojibake of it.
+fn decode_text(bytes: &[u8]) -> String {
+    // 1. Byte-order mark
+    if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        return String::from_utf8_lossy(&bytes[3..]).into_owned();
+    }
+    if bytes.starts_with(&[0xFF, 0xFE]) {
+        let (text, _, _) = encoding_rs::UTF_16LE.decode(&bytes[2..]);
+        return text.into_owned();
+    }
+    if bytes.starts_with(&[0xFE, 0xFF]) {
+        let (text, _, _) = encoding_rs::UTF_16BE.decode(&bytes[2..]);
+        return text.into_owned();
+    }
+
+    // 2. Plain UTF-8
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return text.to_string();
+    }
+
+    // 3. GB18030
+    let (gb18030, _, _) = encoding_rs::GB18030.decode(bytes);
+    if gb18030.chars().any(is_cjk) {
+        return gb18030.into_owned();
+    }
+
+    // 4. Western European
+    let (latin, _, _) = encoding_rs::WINDOWS_1252.decode(bytes);
+    latin.into_owned()
+}
+
+/// True for the scripts that make GB18030 a plausible reading of a byte
+/// sequence: CJK ideographs (plus extension A and compatibility), kana, hangul.
+fn is_cjk(c: char) -> bool {
+    let cp = c as u32;
+    (0x3040..=0x30FF).contains(&cp)
+        || (0x3400..=0x4DBF).contains(&cp)
+        || (0x4E00..=0x9FFF).contains(&cp)
+        || (0xAC00..=0xD7AF).contains(&cp)
+        || (0xF900..=0xFAFF).contains(&cp)
 }
 
 /// Parse a PDF file — extract raw text using lopdf.
@@ -442,7 +498,10 @@ pub async fn parse_pdf(file_path: String) -> Result<Vec<ParsedChapter>, String> 
 /// If `image_map` is provided, &lt;img&gt; tags are replaced with `[IMG:filename]`
 /// markers using the mapping from original src → extracted filename.
 fn clean_html(html: &str, image_map: Option<&HashMap<String, String>>) -> String {
-    let mut text = html.to_string();
+    // A leading BOM decodes to U+FEFF, which would otherwise become the first
+    // character of the chapter — invisible, but the user would still have to
+    // type past it.
+    let mut text = html.trim_start_matches('\u{FEFF}').to_string();
 
     // ── Step 0: Replace <img> tags with [IMG:...] markers ────────────
     if let Some(map) = image_map {
@@ -478,19 +537,84 @@ fn clean_html(html: &str, image_map: Option<&HashMap<String, String>>) -> String
     // Remove all remaining HTML tags
     text = strip_tags(&text);
 
-    // Decode common HTML entities
-    text = text.replace("&amp;", "&");
-    text = text.replace("&lt;", "<");
-    text = text.replace("&gt;", ">");
-    text = text.replace("&quot;", "\"");
-    text = text.replace("&apos;", "'");
-    text = text.replace("&#39;", "'");
-    text = text.replace("&nbsp;", " ");
+    // Decode HTML character references
+    text = decode_entities(&text);
 
     // Collapse multiple consecutive newlines
     text = collapse_newlines(&text);
 
     text.trim().to_string()
+}
+
+/// Decode HTML character references in a single left-to-right pass.
+///
+/// One pass matters. The previous implementation was a chain of `replace()`
+/// calls, which decodes twice: the source text `&amp;#39;` denotes the literal
+/// string "&#39;", but replacing `&amp;` first yields `&#39;`, and the next
+/// replace silently turns that into `'`.
+///
+/// The named table covers the handful that actually occur in book prose;
+/// everything else falls through to numeric decoding, which is what matters in
+/// practice — `&#x4E2D;` is just "中", and books converted between formats use
+/// numeric references heavily. Anything unrecognised is left verbatim.
+fn decode_entities(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+
+    while let Some(amp) = rest.find('&') {
+        out.push_str(&rest[..amp]);
+        rest = &rest[amp..];
+
+        // Every reference handled here is well under 12 characters. Capping the
+        // search keeps a stray '&' in prose from swallowing the paragraph up to
+        // some far-off semicolon.
+        let semi = rest
+            .char_indices()
+            .take(12)
+            .find(|&(_, c)| c == ';')
+            .map(|(i, _)| i);
+
+        let decoded = semi.and_then(|i| match &rest[1..i] {
+            "amp" => Some('&'),
+            "lt" => Some('<'),
+            "gt" => Some('>'),
+            "quot" => Some('"'),
+            "apos" => Some('\''),
+            "nbsp" => Some(' '),
+            body => decode_numeric(body),
+        });
+
+        match (semi, decoded) {
+            (Some(i), Some(c)) => {
+                out.push(c);
+                rest = &rest[i + 1..];
+            }
+            _ => {
+                // Not a reference we recognise — emit the '&' and carry on, so
+                // the caller still sees the original text.
+                out.push('&');
+                rest = &rest[1..];
+            }
+        }
+    }
+
+    out.push_str(rest);
+    out
+}
+
+/// Decode the body of a numeric character reference — `#123` or `#x1F600`.
+/// `None` for anything malformed, or for code points that are not characters
+/// (surrogate halves, out of range).
+fn decode_numeric(body: &str) -> Option<char> {
+    let digits = body.strip_prefix('#')?;
+    let (radix, digits) = match digits
+        .strip_prefix('x')
+        .or_else(|| digits.strip_prefix('X'))
+    {
+        Some(hex) => (16, hex),
+        None => (10, digits),
+    };
+    char::from_u32(u32::from_str_radix(digits, radix).ok()?)
 }
 
 /// Replace `<img src="...">` tags with `[IMG:filename]` markers.
@@ -772,4 +896,98 @@ fn is_chapter_heading(line: &str) -> bool {
     }
 
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Character references ────────────────────────────────────────────────
+
+    #[test]
+    fn decodes_named_entities() {
+        assert_eq!(
+            decode_entities("a &amp; b &lt;c&gt; &quot;d&quot; &apos;e&apos;"),
+            "a & b <c> \"d\" 'e'"
+        );
+    }
+
+    #[test]
+    fn decodes_numeric_entities_in_both_radixes() {
+        // 中 = U+4E2D = 20013, 文 = U+6587 = 25991
+        assert_eq!(decode_entities("&#x4E2D;&#25991;"), "中文");
+        assert_eq!(decode_entities("&#X4E2D;"), "中");
+    }
+
+    #[test]
+    fn does_not_decode_twice() {
+        // "&amp;#39;" denotes the literal string "&#39;", not an apostrophe.
+        // A chain of replace() calls gets this wrong; a single pass cannot.
+        assert_eq!(decode_entities("&amp;#39;"), "&#39;");
+    }
+
+    #[test]
+    fn leaves_unrecognised_references_verbatim() {
+        assert_eq!(decode_entities("AT&T &unknown; &#xZZ;"), "AT&T &unknown; &#xZZ;");
+    }
+
+    #[test]
+    fn rejects_non_characters() {
+        // Lone surrogate half, and beyond the Unicode range.
+        assert_eq!(decode_entities("&#xD800;"), "&#xD800;");
+        assert_eq!(decode_entities("&#x110000;"), "&#x110000;");
+    }
+
+    #[test]
+    fn a_stray_ampersand_does_not_swallow_the_text() {
+        // No semicolon within reach — must not eat the following characters.
+        assert_eq!(decode_entities("Tom & Jerry went home"), "Tom & Jerry went home");
+    }
+
+    // ── Text decoding ───────────────────────────────────────────────────────
+
+    #[test]
+    fn plain_utf8_passes_through() {
+        assert_eq!(decode_text("中文 abc".as_bytes()), "中文 abc");
+    }
+
+    #[test]
+    fn utf8_bom_is_stripped() {
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend_from_slice("中文".as_bytes());
+        assert_eq!(decode_text(&bytes), "中文");
+    }
+
+    #[test]
+    fn utf16le_with_bom_is_decoded() {
+        let mut bytes = vec![0xFF, 0xFE];
+        for unit in "中文".encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        assert_eq!(decode_text(&bytes), "中文");
+    }
+
+    #[test]
+    fn gbk_text_is_recovered() {
+        // "中文" as GBK — not valid UTF-8, so this used to fail the import.
+        let gbk = [0xD6u8, 0xD0, 0xCE, 0xC4];
+        assert_eq!(decode_text(&gbk), "中文");
+    }
+
+    #[test]
+    fn gbk_punctuation_and_ascii_mix_is_recovered() {
+        // "他说：OK。" as GBK — the colon and full stop are GBK two-byte forms.
+        let gbk = [
+            0xCBu8, 0xFB, 0xCB, 0xB5, 0xA3, 0xBA, 0x4F, 0x4B, 0xA1, 0xA3,
+        ];
+        assert_eq!(decode_text(&gbk), "他说：OK。");
+    }
+
+    #[test]
+    fn western_european_falls_back_to_1252() {
+        // "café" as Windows-1252. GB18030 turns this into mojibake with no CJK,
+        // which is exactly the signal that selects the Latin fallback.
+        let latin = [0x63u8, 0x61, 0x66, 0xE9];
+        assert_eq!(decode_text(&latin), "café");
+    }
 }
