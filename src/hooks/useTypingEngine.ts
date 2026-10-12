@@ -1,6 +1,7 @@
 import { useEffect, useRef, useCallback } from "react";
 import type { MutableRefObject } from "react";
 import { useTypingStore } from "@/store";
+import { isWhitespace } from "@/lib/utils";
 
 export interface TypingEngineOptions {
   /**
@@ -27,6 +28,7 @@ export function useTypingEngine(options: TypingEngineOptions = {}) {
     isPaused,
     targetText,
     cursorIndex,
+    hasStarted,
     updateStats,
   } = useTypingStore();
 
@@ -44,15 +46,17 @@ export function useTypingEngine(options: TypingEngineOptions = {}) {
   // ── WPM update timer ──────────────────────────────────────────────────
 
   useEffect(() => {
-    if (isActive && !isPaused) {
-      // First keystroke: initialise the clock
+    // The clock only runs once the user has actually typed something.
+    // Opening a book no longer starts the timer — see `hasStarted`.
+    if (isActive && !isPaused && hasStarted) {
       if (startTimeRef.current === 0) {
+        // First keystroke: start the clock. Any pause taken before the first
+        // keystroke must not be compensated for, so drop it here.
         startTimeRef.current = Date.now();
-      }
-
-      // Coming back from a pause — shift startTime forward by the
-      // paused duration so elapsed time doesn't include the pause.
-      if (pauseStartRef.current > 0) {
+        pauseStartRef.current = 0;
+      } else if (pauseStartRef.current > 0) {
+        // Coming back from a pause — shift startTime forward by the
+        // paused duration so elapsed time doesn't include the pause.
         startTimeRef.current += Date.now() - pauseStartRef.current;
         pauseStartRef.current = 0;
       }
@@ -81,15 +85,19 @@ export function useTypingEngine(options: TypingEngineOptions = {}) {
         timerRef.current = null;
       }
     };
-  }, [isActive, isPaused, updateStats]);
+  }, [isActive, isPaused, hasStarted, updateStats]);
 
-  // Reset timer when session ends
+  // Reset the clock whenever the session ends or is restarted.
+  // Keyed on `hasStarted` rather than `isActive` so that restarting an
+  // already-active session ("重来") also resets it — startSession clears
+  // hasStarted but leaves isActive true, so an isActive-keyed effect would
+  // silently keep the old start time.
   useEffect(() => {
-    if (!isActive) {
+    if (!hasStarted) {
       startTimeRef.current = 0;
       pauseStartRef.current = 0;
     }
-  }, [isActive]);
+  }, [hasStarted]);
 
   // ── Focus management ──────────────────────────────────────────────────
 
@@ -101,10 +109,18 @@ export function useTypingEngine(options: TypingEngineOptions = {}) {
   }, [isActive, isPaused]);
 
   // Re-focus if the user accidentally clicks away.
+  //
+  // Guarded on IME composition: restoring focus while a composition is in
+  // flight desyncs WebView2's text-input state and kills the renderer
+  // (msedge.dll, STATUS_BREAKPOINT 0x80000003 — the crash documented in
+  // MicrosoftEdge/WebView2Feedback#5475). Better to lose a focus restoration
+  // than the whole page.
   const handleBlur = useCallback(() => {
+    if (isComposingRef.current) return;
     const state = useTypingStore.getState();
     if (state.isActive && !state.isPaused) {
       requestAnimationFrame(() => {
+        if (isComposingRef.current) return;
         const s = useTypingStore.getState();
         if (s.isActive && !s.isPaused && inputRef.current) {
           inputRef.current.focus();
@@ -139,7 +155,7 @@ export function useTypingEngine(options: TypingEngineOptions = {}) {
       if (expected === undefined) break; // reached end of text
 
       // Auto-skip all consecutive whitespace before processing input
-      while (expected === " " || expected === "\n" || expected === "\t" || expected === "\r") {
+      while (isWhitespace(expected)) {
         state.skipWhitespace();
         state = useTypingStore.getState();
         expected = state.targetText[state.cursorIndex];
@@ -158,8 +174,10 @@ export function useTypingEngine(options: TypingEngineOptions = {}) {
       }
     }
 
-    // Clear the textarea so the next input is fresh
-    textarea.value = "";
+    // Clear the textarea so the next input is fresh. Never do this while a
+    // composition is still being processed — mutating the value underneath
+    // the IME is what desyncs WebView2's text-input state.
+    if (!isComposingRef.current) textarea.value = "";
   }, []);
 
   // ── IME composition tracking ──────────────────────────────────────────
@@ -209,10 +227,7 @@ export function useTypingEngine(options: TypingEngineOptions = {}) {
         // Auto-skip any following whitespace until we hit visible text
         state = useTypingStore.getState();
         let expected = state.targetText[state.cursorIndex];
-        while (
-          expected !== undefined &&
-          (expected === " " || expected === "\n" || expected === "\t" || expected === "\r")
-        ) {
+        while (isWhitespace(expected)) {
           state.skipWhitespace();
           state = useTypingStore.getState();
           expected = state.targetText[state.cursorIndex];
@@ -230,10 +245,7 @@ export function useTypingEngine(options: TypingEngineOptions = {}) {
 
         // Auto-skip ALL consecutive whitespace until we hit visible text
         let expected = state.targetText[state.cursorIndex];
-        while (
-          expected !== undefined &&
-          (expected === " " || expected === "\n" || expected === "\t" || expected === "\r")
-        ) {
+        while (isWhitespace(expected)) {
           state.skipWhitespace();
           const next = useTypingStore.getState();
           expected = next.targetText[next.cursorIndex];
@@ -259,7 +271,10 @@ export function useTypingEngine(options: TypingEngineOptions = {}) {
         return;
       }
 
-      // If the textarea lost focus, refocus it so it can capture input
+      // If the textarea lost focus, refocus it so it can capture input.
+      // Never do this mid-composition — it races the IME and crashes the
+      // WebView2 renderer (see the note on handleBlur).
+      if (isComposingRef.current) return;
       if (inputRef.current && document.activeElement !== inputRef.current) {
         e.preventDefault();
         inputRef.current.focus();
@@ -269,6 +284,21 @@ export function useTypingEngine(options: TypingEngineOptions = {}) {
     };
     window.addEventListener("keydown", onWindowKeydown);
     return () => window.removeEventListener("keydown", onWindowKeydown);
+  }, []);
+
+  // While an IME composition is in flight, stop mouse presses from moving
+  // focus off the hidden textarea. This is the only workaround that reliably
+  // prevents the WebView2 renderer crash documented in
+  // MicrosoftEdge/WebView2Feedback#5475 — `preventDefault()` on mousedown
+  // suppresses the focus change but the subsequent `click` still fires, so
+  // every control keeps working.
+  useEffect(() => {
+    const suppressFocusSteal = (e: MouseEvent) => {
+      if (isComposingRef.current) e.preventDefault();
+    };
+    document.addEventListener("mousedown", suppressFocusSteal, true);
+    return () =>
+      document.removeEventListener("mousedown", suppressFocusSteal, true);
   }, []);
 
   // ── Session completion ────────────────────────────────────────────────

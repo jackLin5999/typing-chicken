@@ -1,11 +1,19 @@
 import { create } from "zustand";
 import type { TypingStats } from "@/types/typing";
-import { getImageMarkerLength } from "@/lib/utils";
+import { getImageMarkerLength, isWhitespace } from "@/lib/utils";
 
 interface TypingState {
   isActive: boolean;
   isPaused: boolean;
   isComplete: boolean;
+  /**
+   * True once the user has actually pressed a key in this session.
+   *
+   * The WPM clock stays at 0 until then, so the time spent getting oriented
+   * after opening a book is not counted as typing time. Only real keystrokes
+   * set this — the automatic whitespace skip does not.
+   */
+  hasStarted: boolean;
   stats: TypingStats;
   targetText: string;
   cursorIndex: number;
@@ -25,11 +33,6 @@ interface TypingState {
   backspace: () => void;
   setCursorIndex: (index: number) => void;
   setIncorrectIndices: (indices: number[]) => void;
-}
-
-/** Returns true if the character is whitespace (auto-skipped by the engine). */
-function isWhitespace(ch: string): boolean {
-  return ch === " " || ch === "\n" || ch === "\t" || ch === "\r";
 }
 
 /**
@@ -67,6 +70,7 @@ const INITIAL = {
   isActive: false,
   isPaused: false,
   isComplete: false,
+  hasStarted: false,
   stats: { ...defaultStats },
   targetText: "",
   cursorIndex: 0,
@@ -100,6 +104,7 @@ export const useTypingStore = create<TypingState>((set) => ({
       return {
         cursorIndex: newIndex,
         isComplete: newIndex >= s.targetText.length,
+        hasStarted: true,
         incorrectIndices: correct
           ? s.incorrectIndices
           : [...s.incorrectIndices, s.cursorIndex],

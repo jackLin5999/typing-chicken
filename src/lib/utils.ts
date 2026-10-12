@@ -8,6 +8,22 @@ export function formatTime(totalSeconds: number): string {
 }
 
 /**
+ * True for characters the typing engine skips automatically instead of asking
+ * the user to type them.
+ *
+ * Uses the Unicode white-space set rather than a hardcoded list of
+ * `" " / "\n" / "\t" / "\r"`. Chinese e-books indent paragraphs with
+ * U+3000 IDEOGRAPHIC SPACE and frequently contain U+00A0 NO-BREAK SPACE;
+ * neither is a plain space, so a hardcoded list leaves the cursor parked on an
+ * invisible character the user has to press space through at the start of
+ * every paragraph. `\s` covers every Unicode Space_Separator plus the line
+ * terminators, which is exactly the set we want.
+ */
+export function isWhitespace(ch: string | undefined): boolean {
+  return ch !== undefined && /\s/.test(ch);
+}
+
+/**
  * Segment text into an array of characters for rendering, preserving newlines.
  */
 export function segmentText(text: string): string[] {
