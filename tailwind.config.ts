@@ -2,6 +2,17 @@ import type { Config } from "tailwindcss";
 
 export default {
   content: ["./index.html", "./src/**/*.{js,ts,jsx,tsx}"],
+  /*
+   * `sepia` is our THEME class on <html>, but Tailwind also ships a `sepia`
+   * FILTER utility (`filter: sepia(100%)`). The content scanner matches on
+   * raw text, so it finds the string "sepia" in our theme key and generates
+   * that utility — and since the theme class has the same name, the whole
+   * document silently gets `filter: sepia(100%)` stacked on top of the sepia
+   * palette. That washes every colour toward cream, removes all blue (the
+   * current-character highlight and pinyin included) and drops text/background
+   * contrast to ~1.03:1. Block the utility so it can never be generated.
+   */
+  blocklist: ["sepia", "sepia-0"],
   darkMode: "class",
   theme: {
     extend: {
@@ -22,7 +33,7 @@ export default {
         },
         muted: {
           light: "#8E8E93",
-          sepia: "#9C8B7E",
+          sepia: "#756551",
           dark: "#6E6E7A",
           DEFAULT: "rgb(var(--color-muted) / <alpha-value>)",
         },

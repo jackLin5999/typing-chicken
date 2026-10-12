@@ -27,15 +27,25 @@
   --color-error: 239 68 68;           /* #EF4444 — red-500 */
 }
 
+/*
+ * Sepia — the "book mode": genuinely warm paper with brown ink, not a
+ * slightly-off-white that reads as identical to the light theme. These are
+ * the values tailwind.config.ts declared for `paper.sepia` / `ink.sepia`
+ * all along but that nothing ever consumed.
+ *
+ * Both colours move, which is what makes the mode legible as its own thing.
+ * Contrast on #F4ECD8: body 7.5:1, muted (untyped text) 4.4:1 — the old
+ * #8E8E93 measured only 2.9:1 and failed WCAG AA outright.
+ */
 html.sepia {
-  --color-paper: 248 244 235;        /* #F8F4EB — barely warm, almost white */
-  --color-ink: 26 26 26;             /* same as light */
-  --color-muted: 142 142 147;        /* same as light */
-  --color-surface: 252 250 246;      /* #FCFAF6 */
-  --color-surface-alt: 245 240 230;  /* #F5F0E6 */
-  --color-surface-hover: 237 230 216;/* #EDE6D8 */
-  --color-pinyin: 100 155 248;       /* same as light */
-  --color-error: 185 50 50;          /* #B93232 — darker crimson, visible on warm bg */
+  --color-paper: 244 236 216;        /* #F4ECD8 — warm paper */
+  --color-ink: 91 70 54;             /* #5B4636 — dark brown ink */
+  --color-muted: 117 101 81;         /* #756551 — warm brown, 4.8:1 on paper */
+  --color-surface: 250 245 231;      /* #FAF5E7 — raised card, lighter than paper */
+  --color-surface-alt: 237 227 203;  /* #EDE3CB */
+  --color-surface-hover: 227 214 187;/* #E3D6BB */
+  --color-pinyin: 68 103 155;        /* #44679B — deep blue, 4.9:1 on warm paper */
+  --color-error: 185 50 50;          /* #B93232 — 5.0:1 on warm paper */
 }
 
 html.dark {
@@ -88,7 +98,7 @@ html.dark {
   }
 
   html.sepia ::-webkit-scrollbar-thumb {
-    background-color: rgba(139, 119, 90, 0.25);
+    background-color: rgba(122, 106, 88, 0.25);
   }
 
   html.dark ::-webkit-scrollbar-thumb {
@@ -100,7 +110,7 @@ html.dark {
   }
 
   html.sepia ::-webkit-scrollbar-thumb:hover {
-    background-color: rgba(139, 119, 90, 0.4);
+    background-color: rgba(122, 106, 88, 0.4);
   }
 
   html.dark ::-webkit-scrollbar-thumb:hover {
@@ -205,41 +215,68 @@ html.dark ::selection {
  * These rules bypass CSS variables entirely and set colors directly,
  * ensuring sepia mode works regardless of WebView2 CSS variable support.
  */
+/*
+ * Neutralise Tailwind's built-in `.sepia` FILTER utility.
+ *
+ * Tailwind ships `.sepia { filter: sepia(100%) }`, and its content scanner
+ * matches raw text — so it finds the string "sepia" in our theme key and
+ * generates that utility. Our theme class is also called `sepia`, so <html>
+ * matched it and the entire document got a sepia colour filter stacked on top
+ * of the sepia palette: every colour washed to cream, no blue left anywhere
+ * (current-character highlight and pinyin included), and text/background
+ * contrast collapsed to about 1.03:1.
+ *
+ * Belt-and-braces with the `blocklist` entry in tailwind.config.ts — this one
+ * holds even if the utility is ever regenerated.
+ */
 html.sepia {
-  background-color: #F8F4EB;
+  filter: none;
+}
+
+/*
+ * ⚠️ These duplicate the `--color-*` variables set above, in plain hex.
+ * The declared reason was WebView2 not supporting CSS variables — which has
+ * not been true for years (WebView2 is Chromium; custom properties landed in
+ * Chrome 49). They are dead weight and a standing drift hazard: this palette
+ * already drifted once, with the variables and these rules disagreeing.
+ * Kept for now to avoid changing behaviour in the same pass as the redesign;
+ * safe to delete.
+ */
+html.sepia {
+  background-color: #F4ECD8;
 }
 
 html.sepia body {
-  background-color: #F8F4EB;
-  color: #1A1A1A;
+  background-color: #F4ECD8;
+  color: #5B4636;
 }
 
 html.sepia .text-ink {
-  color: #1A1A1A;
+  color: #5B4636;
 }
 
 html.sepia .text-muted {
-  color: #8E8E93;
+  color: #756551;
 }
 
 html.sepia .text-pinyin {
-  color: #649BF8;
+  color: #44679B;
 }
 
 html.sepia .bg-paper {
-  background-color: #F8F4EB;
+  background-color: #F4ECD8;
 }
 
 html.sepia .bg-surface {
-  background-color: #FCFAF6;
+  background-color: #FAF5E7;
 }
 
 html.sepia .bg-surface-alt {
-  background-color: #F5F0E6;
+  background-color: #EDE3CB;
 }
 
 html.sepia .bg-surface-hover {
-  background-color: #EDE6D8;
+  background-color: #E3D6BB;
 }
 
 html.sepia .text-error {
