@@ -3,6 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "description": "A premium desktop typing practice app — import your own e-books and type along.",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "vite",

@@ -71,4 +71,6 @@ npm run tauri build
 
 ## 📄 许可证
 
-本项目当前未指定开源许可证。若计划公开分发，建议选择 [MIT](https://choosealicense.com/licenses/mit/) 等许可证并在本段注明。
+本项目基于 [MIT 许可证](LICENSE) 开源。
+
+Copyright (c) 2026 jackLin5999
