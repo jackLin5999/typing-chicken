@@ -1,0 +1,49 @@
+# ===== Node.js / 前端构建 =====
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# ===== Rust / Tauri 编译产物 =====
+src-tauri/target/
+src-tauri/gen/schemas/
+*.rs.bk
+
+# ===== 打包产物（安装程序）=====
+打字雞/
+*.exe
+*.msi
+*.msix
+*.app
+*.dmg
+*.deb
+*.rpm
+
+# ===== 编辑器 / IDE =====
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# ===== 日志 =====
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ===== 系统文件 =====
+.DS_Store
+Thumbs.db
+
+# ===== 环境变量 / 密钥 =====
+.env
+.env.*
+!.env.example
+
+# ===== 个人笔记 / 工具文件（不入库）=====
+.workbuddy/
+上传GitHub完整流程.md

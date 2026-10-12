@@ -1,0 +1,247 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── Theme CSS custom properties ────────────────────────────────────────── */
+/*
+ * All theme-aware colors are defined as RGB channels so Tailwind's
+ * opacity modifier works (e.g. `bg-surface/70`).
+ *
+ * Components should use the semantic utilities:
+ *   text-ink          → primary text
+ *   text-muted        → secondary / caption text
+ *   bg-paper          → page / chrome background
+ *   bg-surface        → raised card / panel
+ *   bg-surface-alt    → button / stat-card background
+ *   bg-surface-hover  → hover state background
+ */
+
+:root {
+  --color-paper: 245 240 233;        /* #F5F0E9 — warm cream, easy on eyes */
+  --color-ink: 26 26 26;             /* #1A1A1A */
+  --color-muted: 142 142 147;        /* #8E8E93 */
+  --color-surface: 252 249 244;      /* #FCF9F4 — off-white card */
+  --color-surface-alt: 242 237 229;  /* #F2EDE5 */
+  --color-surface-hover: 234 228 218;/* #EAE4DA */
+  --color-pinyin: 100 155 248;       /* #649BF8 — soft blue */
+  --color-error: 239 68 68;           /* #EF4444 — red-500 */
+}
+
+html.sepia {
+  --color-paper: 248 244 235;        /* #F8F4EB — barely warm, almost white */
+  --color-ink: 26 26 26;             /* same as light */
+  --color-muted: 142 142 147;        /* same as light */
+  --color-surface: 252 250 246;      /* #FCFAF6 */
+  --color-surface-alt: 245 240 230;  /* #F5F0E6 */
+  --color-surface-hover: 237 230 216;/* #EDE6D8 */
+  --color-pinyin: 100 155 248;       /* same as light */
+  --color-error: 185 50 50;          /* #B93232 — darker crimson, visible on warm bg */
+}
+
+html.dark {
+  --color-paper: 30 30 46;           /* #1E1E2E */
+  --color-ink: 212 212 212;          /* #D4D4D4 */
+  --color-muted: 110 110 122;        /* #6E6E7A */
+  --color-surface: 42 42 60;         /* #2A2A3C */
+  --color-surface-alt: 53 53 71;     /* #353547 */
+  --color-surface-hover: 65 65 85;   /* #414155 */
+  --color-pinyin: 85 140 210;        /* #558CD2 — soft blue for dark */
+  --color-error: 248 113 113;         /* #F87171 — red-400 for dark */
+}
+
+/* ── Base layer ─────────────────────────────────────────────────────────── */
+
+@layer base {
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+
+  html {
+    -webkit-font-smoothing: auto;
+    -moz-osx-font-smoothing: auto;
+    text-rendering: optimizeLegibility;
+    background-color: rgb(var(--color-paper));
+  }
+
+  body {
+    margin: 0;
+    padding: 0;
+    font-family: "Inter", "SF Pro Display", system-ui, sans-serif;
+    background-color: rgb(var(--color-paper));
+    color: rgb(var(--color-ink));
+  }
+
+  /* Custom scrollbar — thin and subtle */
+  ::-webkit-scrollbar {
+    width: 6px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background-color: rgba(0, 0, 0, 0.15);
+    border-radius: 3px;
+  }
+
+  html.sepia ::-webkit-scrollbar-thumb {
+    background-color: rgba(139, 119, 90, 0.25);
+  }
+
+  html.dark ::-webkit-scrollbar-thumb {
+    background-color: rgba(255, 255, 255, 0.15);
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background-color: rgba(0, 0, 0, 0.25);
+  }
+
+  html.sepia ::-webkit-scrollbar-thumb:hover {
+    background-color: rgba(139, 119, 90, 0.4);
+  }
+
+  html.dark ::-webkit-scrollbar-thumb:hover {
+    background-color: rgba(255, 255, 255, 0.25);
+  }
+}
+
+/* ── Selection color ────────────────────────────────────────────────────── */
+
+::selection {
+  background-color: rgba(59, 130, 246, 0.2);
+  color: inherit;
+}
+
+html.dark ::selection {
+  background-color: rgba(59, 130, 246, 0.3);
+}
+
+/* ── Utility classes ────────────────────────────────────────────────────── */
+
+@layer utilities {
+  /* Hide scrollbar but keep scroll functionality */
+  .scrollbar-hide {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+
+  .scrollbar-hide::-webkit-scrollbar {
+    display: none;
+  }
+
+  /* Text balance for headings */
+  .text-balance {
+    text-wrap: balance;
+  }
+}
+
+/* ── Glass-morphism stats bar ────────────────────────────────────────────── */
+/*
+ * Backdrop-blur on a ::before pseudo-element keeps the compositor layer
+ * separate from the text content, preserving ClearType subpixel rendering
+ * (critical for CJK text clarity on Windows/WebView2).
+ */
+.glass-stats {
+  position: relative;
+  isolation: isolate;
+}
+.glass-stats::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: rgb(255 255 255 / 0.15);
+  backdrop-filter: blur(32px) saturate(150%);
+  -webkit-backdrop-filter: blur(32px) saturate(150%);
+  border: 1px solid rgb(255 255 255 / 0.4);
+  box-shadow:
+    0 1px 3px rgb(0 0 0 / 0.04),
+    0 4px 16px rgb(0 0 0 / 0.06);
+  z-index: -1;
+  /* Prevent the blur layer from eating pointer events */
+  pointer-events: none;
+}
+.dark .glass-stats::before {
+  background: rgb(255 255 255 / 0.05);
+  border-color: rgb(255 255 255 / 0.08);
+  box-shadow:
+    0 1px 3px rgb(0 0 0 / 0.2),
+    0 4px 16px rgb(0 0 0 / 0.3);
+}
+
+/* ── Animations ─────────────────────────────────────────────────────────── */
+
+@keyframes slide-in-left {
+  from {
+    transform: translateX(-100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+.animate-slide-in-left {
+  animation: slide-in-left 0.2s ease-out;
+}
+
+/* Reduce motion for users who prefer it */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* ── Sepia mode hard overrides ──────────────────────────────────────────── */
+/*
+ * These rules bypass CSS variables entirely and set colors directly,
+ * ensuring sepia mode works regardless of WebView2 CSS variable support.
+ */
+html.sepia {
+  background-color: #F8F4EB;
+}
+
+html.sepia body {
+  background-color: #F8F4EB;
+  color: #1A1A1A;
+}
+
+html.sepia .text-ink {
+  color: #1A1A1A;
+}
+
+html.sepia .text-muted {
+  color: #8E8E93;
+}
+
+html.sepia .text-pinyin {
+  color: #649BF8;
+}
+
+html.sepia .bg-paper {
+  background-color: #F8F4EB;
+}
+
+html.sepia .bg-surface {
+  background-color: #FCFAF6;
+}
+
+html.sepia .bg-surface-alt {
+  background-color: #F5F0E6;
+}
+
+html.sepia .bg-surface-hover {
+  background-color: #EDE6D8;
+}
+
+html.sepia .text-error {
+  color: #B93232;
+}
