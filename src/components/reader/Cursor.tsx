@@ -5,7 +5,7 @@ export function Cursor() {
   return (
     <span
       className="
-        absolute right-0 top-1/2 -translate-y-1/2
+        absolute left-0 top-1/2 -translate-y-1/2
         w-[3px] h-[1.35em]
         bg-accent
         animate-cursor-blink

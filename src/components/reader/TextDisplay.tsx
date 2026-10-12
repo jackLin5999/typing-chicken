@@ -137,14 +137,66 @@ function ImageBlock({ filename, bookId }: { filename: string; bookId: string }) 
 
 const LOOKAHEAD = 6;
 
+/**
+ * Windowing.
+ *
+ * Only characters within this many indices of the cursor are rendered as
+ * individual `<span>` elements. Everything outside the window is collapsed
+ * into a single plain text node instead, so the mounted node count stays
+ * ~constant (~BACK + FORWARD) no matter how long the chapter is.
+ *
+ * Rendering every character of a whole book as its own span overflows
+ * WebView2's renderer and crashes the page (STATUS_BREAKPOINT). That is
+ * exactly what happens for a TXT/PDF imported as one "Full Text" chapter,
+ * or an EPUB without a usable TOC — the parser has no maximum chapter
+ * length, so `targetText` can be the entire book.
+ */
+const WINDOW_BACK = 1500;
+const WINDOW_FORWARD = 1500;
+
+/**
+ * Quantise the window start to a multiple of this many characters, so the
+ * collapsed prefix text node changes — and therefore re-lays out — only once
+ * every WINDOW_STEP keystrokes rather than on every single one.
+ */
+const WINDOW_STEP = 256;
+
+/**
+ * Auto-scroll. Fractions of the reading column's visible height.
+ *
+ * The cursor is allowed to drift freely inside the safe band; only when it
+ * pushes past an edge do we re-anchor it to CARET_ANCHOR. Scrolling on every
+ * keystroke would twitch the column constantly, and re-anchoring every line
+ * would creep — this re-anchors once every ~6 lines by roughly 3 lines.
+ */
+const CARET_BAND_TOP = 0.35;
+const CARET_BAND_BOTTOM = 0.65;
+const CARET_ANCHOR = 0.5;
+
+/**
+ * Render a collapsed (non-interactive) text run: newlines become `<br/>` so
+ * the surrounding flow matches the per-character rendering.
+ */
+function renderPlainRun(text: string, keyBase: string): React.ReactNode {
+  const lines = text.split("\n");
+  if (lines.length === 1) return text;
+  const nodes: React.ReactNode[] = [];
+  lines.forEach((line, idx) => {
+    if (idx > 0) nodes.push(<br key={`${keyBase}-br-${idx}`} />);
+    if (line) nodes.push(line);
+  });
+  return nodes;
+}
+
 // ── TextDisplay ──────────────────────────────────────────────────────────────
 
 /**
  * Renders the book text with per-character visual feedback + a hidden
  * `<textarea>` that captures keyboard input including IME composition.
  *
- * Characters are rendered via memoized `<CharSpan>` so that only the
- * characters whose state actually changed (cursor move, error) touch the DOM.
+ * Only the characters inside a window around the cursor are rendered via
+ * memoized `<CharSpan>`; the rest of the chapter is one plain text node. This
+ * keeps the DOM bounded regardless of chapter length (see WINDOW_BACK).
  * No CSS transitions on individual spans — 50K transition listeners would
  * overwhelm the GPU compositor and crash WebView2.
  */
@@ -171,20 +223,17 @@ export function TextDisplay({
     [incorrectIndices],
   );
 
-  // Pre-compute character states in one pass so CharSpan can be pure-memo.
-  const charStates = useMemo(() => {
-    const states: CharSpanProps["state"][] = new Array(chars.length);
-    for (let i = 0; i < chars.length; i++) {
-      if (i < cursorIndex) {
-        states[i] = incorrectSet.has(i) ? "incorrect" : "correct";
-      } else if (i === cursorIndex) {
-        states[i] = "current";
-      } else {
-        states[i] = "untyped";
-      }
-    }
-    return states;
-  }, [chars.length, cursorIndex, incorrectSet]);
+  // The mount window: characters in [windowStart, windowEnd) get their own
+  // <CharSpan>. It is always wide enough to contain the cursor, so the IME
+  // textarea anchor (querySelector('[data-char-index=...]')) always resolves.
+  const windowStart = Math.max(
+    0,
+    Math.floor((cursorIndex - WINDOW_BACK) / WINDOW_STEP) * WINDOW_STEP,
+  );
+  const windowEnd = Math.min(
+    chars.length,
+    windowStart + WINDOW_BACK + WINDOW_FORWARD,
+  );
 
   // Detect heading lines → bold + slightly larger font
   const headingChars = useMemo(() => {
@@ -211,17 +260,6 @@ export function TextDisplay({
     }
     return map;
   }, [targetText]);
-
-  // Pre-scan: which indices are "consumed" by image markers (skip in render)
-  const imageConsumed = useMemo(() => {
-    const set = new Set<number>();
-    for (const [start, { length }] of imageMarkers) {
-      for (let i = start; i < start + length; i++) {
-        set.add(i);
-      }
-    }
-    return set;
-  }, [imageMarkers]);
 
   // Pinyin
   const [pinyinMap, setPinyinMap] = useState<Map<number, string>>(new Map());
@@ -268,23 +306,49 @@ export function TextDisplay({
     [inputRef],
   );
 
-  // ── Position the hidden textarea near the current cursor ────────────────────
-  // The IME candidate window anchors to the focused textarea. We set its
-  // position synchronously in a layout effect (before the browser paints) and
-  // write directly to the DOM node — no React state / extra re-render — so the
-  // textarea never flickers between an old and new position while the IME is
-  // composing, which is what made the candidate box blink.
+  // ── Follow the cursor: scroll the column, then anchor the IME textarea ──────
+  //
+  // Two jobs, one DOM lookup, in this order on purpose:
+  //   1. Scroll the reading column if the cursor has left the safe band.
+  //   2. Pin the hidden textarea under the current character so the IME
+  //      candidate window opens there instead of at the top-left corner.
+  //
+  // Scrolling MUST come first: getBoundingClientRect() is viewport-relative,
+  // so the textarea coordinates read before a scroll are stale by exactly the
+  // amount we just scrolled.
+  //
+  // Everything is written straight to the DOM in a layout effect (before paint,
+  // no extra render) so the textarea never flickers between an old and a new
+  // position mid-composition — that flicker is what made the candidate box blink.
   useLayoutEffect(() => {
-    const el = textareaEl.current;
-    if (!el) return;
     const charEl = document.querySelector<HTMLElement>(
       `[data-char-index="${cursorIndex}"]`,
     );
-    if (charEl) {
-      const rect = charEl.getBoundingClientRect();
-      el.style.left = `${rect.left}px`;
-      el.style.top = `${rect.bottom + 2}px`;
+    if (!charEl) return;
+
+    // ── 1. Keep the cursor in view ──
+    const scroller = charEl.closest<HTMLElement>("[data-scroll-container]");
+    if (scroller) {
+      const before = charEl.getBoundingClientRect();
+      const box = scroller.getBoundingClientRect();
+      const centre = before.top + before.height / 2;
+      const upper = box.top + box.height * CARET_BAND_TOP;
+      const lower = box.top + box.height * CARET_BAND_BOTTOM;
+
+      if (centre < upper || centre > lower) {
+        const anchorY = box.top + box.height * CARET_ANCHOR;
+        // Instant, not smooth: a smooth scroll is still animating when the
+        // next keystroke reads the rect, so the offsets would compound.
+        scroller.scrollTop += centre - anchorY;
+      }
     }
+
+    // ── 2. Pin the IME textarea (post-scroll coordinates) ──
+    const el = textareaEl.current;
+    if (!el) return;
+    const rect = charEl.getBoundingClientRect();
+    el.style.left = `${rect.left}px`;
+    el.style.top = `${rect.bottom + 2}px`;
   }, [cursorIndex, targetText]);
 
   return (
@@ -294,6 +358,7 @@ export function TextDisplay({
         ${fontSizeMap[fontSize]}
         ${fontFamilyMap[fontFamily]}
         select-none
+        break-all
       `}
       style={{
         lineHeight: effectiveLineHeight,
@@ -348,29 +413,63 @@ export function TextDisplay({
               continue;
             }
 
-            // ── Skip chars already consumed by an image marker ──
-            if (imageConsumed.has(i)) {
-              i++;
+            // ── Inside the window → one interactive <CharSpan> per character ──
+            if (i >= windowStart && i < windowEnd) {
+              let j = i;
+              while (j < windowEnd && !imageMarkers.has(j)) j++;
+              for (let k = i; k < j; k++) {
+                const state: CharSpanProps["state"] =
+                  k < cursorIndex
+                    ? incorrectSet.has(k)
+                      ? "incorrect"
+                      : "correct"
+                    : k === cursorIndex
+                      ? "current"
+                      : "untyped";
+                const charPinyin =
+                  showPinyin && k >= cursorIndex && k < cursorIndex + LOOKAHEAD
+                    ? pinyinMap.get(k)
+                    : undefined;
+                elements.push(
+                  <CharSpan
+                    key={k}
+                    char={chars[k]}
+                    index={k}
+                    state={state}
+                    charPinyin={charPinyin}
+                    isHeading={headingChars.has(k)}
+                  />,
+                );
+              }
+              i = j;
               continue;
             }
 
-            // ── Regular character ──
-            const charPinyin =
-              showPinyin && i >= cursorIndex && i < cursorIndex + LOOKAHEAD
-                ? pinyinMap.get(i)
-                : undefined;
-
+            // ── Outside the window → collapse into a single plain text node ──
+            // Runs are split at heading boundaries so headings keep their bold
+            // styling even when they are far from the cursor.
+            const runIsHeading = headingChars.has(i);
+            let j = i;
+            while (
+              j < chars.length &&
+              !imageMarkers.has(j) &&
+              (j < windowStart || j >= windowEnd) &&
+              headingChars.has(j) === runIsHeading
+            ) {
+              j++;
+            }
+            const runClass = [
+              i < cursorIndex ? "text-ink" : "text-muted",
+              runIsHeading ? "font-bold text-[1.08em] tracking-[0.04em]" : "",
+            ]
+              .filter(Boolean)
+              .join(" ");
             elements.push(
-              <CharSpan
-                key={i}
-                char={chars[i]}
-                index={i}
-                state={charStates[i]}
-                charPinyin={charPinyin}
-                isHeading={headingChars.has(i)}
-              />,
+              <span key={`run-${i}`} className={runClass}>
+                {renderPlainRun(targetText.slice(i, j), `run-${i}`)}
+              </span>,
             );
-            i++;
+            i = j;
           }
 
           // End-of-text marker

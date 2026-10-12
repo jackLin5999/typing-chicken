@@ -263,6 +263,7 @@ export function ReaderPage() {
         onPrevChapter={goToPrevChapter}
         onNextChapter={goToNextChapter}
         onToggleChapterPanel={() => setShowChapterPanel((v) => !v)}
+        onRestart={handleRestart}
       />
     </div>
   );

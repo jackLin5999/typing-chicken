@@ -1,4 +1,4 @@
-import { ArrowLeft, ChevronLeft, ChevronRight, List, Type, Sun, Moon, BookOpen, Minus, Plus, Pause, Play, Languages } from "lucide-react";
+import { ArrowLeft, ChevronLeft, ChevronRight, List, Type, Sun, Moon, BookOpen, Minus, Plus, Pause, Play, RotateCcw, Languages } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { useSettingsStore, useTypingStore } from "@/store";
 import type { Theme, FontFamily, FontSize } from "@/types/settings";
@@ -28,11 +28,15 @@ interface ReaderControlsProps {
   onPrevChapter: () => void;
   onNextChapter: () => void;
   onToggleChapterPanel: () => void;
+  /** Restart the current chapter from the top — progress and stats reset. */
+  onRestart: () => void;
 }
 
 /**
  * Floating control bar for the reader/typing view:
  * - Back to library, chapter navigation
+ * - Session transport: continue / pause / restart-this-chapter
+ * - Pinyin toggle
  * - Theme toggle (Light / Sepia / Dark)
  * - Font family & size
  */
@@ -42,6 +46,7 @@ export function ReaderControls({
   onPrevChapter,
   onNextChapter,
   onToggleChapterPanel,
+  onRestart,
 }: ReaderControlsProps) {
   const navigate = useNavigate();
   const theme = useSettingsStore((s) => s.theme);
@@ -110,16 +115,31 @@ export function ReaderControls({
 
       <div className="w-px h-5 bg-surface-hover mx-1" />
 
-      {/* Pause / Resume */}
+      {/* Play / Pause toggle — one button, both states.
+          The clock starts itself on the first keystroke, so before that the
+          button simply reads as "running" and clicking it pauses. */}
       {isActive && (
         <button
           onClick={() => (isPaused ? resumeSession() : pauseSession())}
           className="p-2 rounded-lg hover:bg-surface-hover transition-colors"
-          aria-label={isPaused ? "Resume" : "Pause"}
+          aria-label={isPaused ? "Continue" : "Pause"}
+          title={isPaused ? "继续（从当前进度接着打）" : "暂停"}
         >
-          {isPaused ? <Play size={15} className="text-accent" /> : <Pause size={15} className="text-muted" />}
+          {isPaused
+            ? <Play size={15} className="text-accent" />
+            : <Pause size={15} className="text-muted" />}
         </button>
       )}
+
+      {/* Restart this chapter from the beginning */}
+      <button
+        onClick={onRestart}
+        className="p-2 rounded-lg hover:bg-surface-hover transition-colors"
+        aria-label="Restart Chapter"
+        title="重来（本章从头开始，进度和统计清零）"
+      >
+        <RotateCcw size={15} className="text-muted" />
+      </button>
 
       {/* Pinyin toggle */}
       <button
