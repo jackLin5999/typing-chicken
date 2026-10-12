@@ -1,6 +1,6 @@
 # 打字雞 (typing chicken)
 
-> 打字阅读一体化的桌面打字练习软件 —— 导入你自己的电子书，边读边打字。（可以去z.library下载电子书）
+> 打字阅读一体化的桌面打字练习软件 —— 导入你自己的电子书，边读边打字。
 > A premium desktop typing practice app — import your own e-books and type along.
 
 ## ✨ 功能特性
