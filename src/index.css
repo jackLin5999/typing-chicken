@@ -210,10 +210,16 @@ html.dark ::selection {
   }
 }
 
-/* ── Sepia mode hard overrides ──────────────────────────────────────────── */
+/* ── Sepia mode ─────────────────────────────────────────────────────────── */
 /*
- * These rules bypass CSS variables entirely and set colors directly,
- * ensuring sepia mode works regardless of WebView2 CSS variable support.
+ * The palette lives in the `--color-*` variables on `html.sepia` above. It used
+ * to be repeated here as plain-hex rules on `.text-ink`, `.bg-paper` and
+ * friends, on the belief that WebView2 did not support CSS custom properties.
+ * It does — WebView2 is Chromium, and custom properties landed in Chrome 49 —
+ * so that block was dead weight and a standing drift hazard: the two copies
+ * disagreed at one point, silently leaving part of the palette stale. What
+ * remains below is not palette work, only the neutralisation of a Tailwind
+ * utility that happens to share our theme's name.
  */
 /*
  * Neutralise Tailwind's built-in `.sepia` FILTER utility.
@@ -231,54 +237,4 @@ html.dark ::selection {
  */
 html.sepia {
   filter: none;
-}
-
-/*
- * ⚠️ These duplicate the `--color-*` variables set above, in plain hex.
- * The declared reason was WebView2 not supporting CSS variables — which has
- * not been true for years (WebView2 is Chromium; custom properties landed in
- * Chrome 49). They are dead weight and a standing drift hazard: this palette
- * already drifted once, with the variables and these rules disagreeing.
- * Kept for now to avoid changing behaviour in the same pass as the redesign;
- * safe to delete.
- */
-html.sepia {
-  background-color: #F4ECD8;
-}
-
-html.sepia body {
-  background-color: #F4ECD8;
-  color: #5B4636;
-}
-
-html.sepia .text-ink {
-  color: #5B4636;
-}
-
-html.sepia .text-muted {
-  color: #756551;
-}
-
-html.sepia .text-pinyin {
-  color: #44679B;
-}
-
-html.sepia .bg-paper {
-  background-color: #F4ECD8;
-}
-
-html.sepia .bg-surface {
-  background-color: #FAF5E7;
-}
-
-html.sepia .bg-surface-alt {
-  background-color: #EDE3CB;
-}
-
-html.sepia .bg-surface-hover {
-  background-color: #E3D6BB;
-}
-
-html.sepia .text-error {
-  color: #B93232;
 }
