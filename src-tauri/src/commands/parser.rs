@@ -332,14 +332,20 @@ fn is_cjk(c: char) -> bool {
         || (0xF900..=0xFAFF).contains(&cp)
 }
 
-/// Parse a PDF file — extract raw text using lopdf.
-/// Wrapped in catch_unwind because lopdf can panic on malformed PDFs.
+/// Parse a PDF file — extract text with the CMap-aware extractor in
+/// `super::pdf_text`, which understands the CID fonts Chinese PDFs use.
+///
+/// A PDF with no usable text layer (a scan, or a font with no `/ToUnicode`)
+/// returns a descriptive `Err` rather than importing an empty book.
+///
+/// Wrapped in `catch_unwind` because a malformed PDF can make `lopdf` panic.
 pub fn parse_pdf_internal(file_path: &str) -> Result<(String, String, Vec<ParsedChapter>, Option<String>), String> {
     let file_path_owned = file_path.to_string();
     let bytes = fs::read(file_path).map_err(|e| e.to_string())?;
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let doc = lopdf::Document::load_mem(&bytes).map_err(|e| format!("Failed to parse PDF: {}", e))?;
+        let extraction = super::pdf_text::extract_pdf_text_from_bytes(&bytes)
+            .map_err(|e| format!("{}: {}", e.code(), e.user_message()))?;
 
         let title = Path::new(&file_path_owned)
             .file_stem()
@@ -347,17 +353,8 @@ pub fn parse_pdf_internal(file_path: &str) -> Result<(String, String, Vec<Parsed
             .unwrap_or("Untitled")
             .to_string();
 
-        let mut all_text = String::new();
-        let page_count = doc.page_iter().count();
-
-        for page_num in 1..=page_count {
-            if let Ok(text) = doc.extract_text(&[page_num as u32]) {
-                all_text.push_str(&text);
-                all_text.push('\n');
-            }
-        }
-
-        let chapters = split_into_chapters(&all_text);
+        let text = collapse_newlines(&extraction.text);
+        let chapters = split_into_chapters(&text);
 
         Ok::<_, String>((title, chapters))
     }))
@@ -872,6 +869,13 @@ fn split_into_chapters(text: &str) -> Vec<ParsedChapter> {
     chapters
 }
 
+/// Exposed so the PDF extractor's tests can assert that extracted line breaks
+/// actually produce chapters.
+#[cfg(test)]
+pub(crate) fn split_into_chapters_for_test(text: &str) -> Vec<ParsedChapter> {
+    split_into_chapters(text)
+}
+
 /// Check if a line looks like a chapter heading.
 fn is_chapter_heading(line: &str) -> bool {
     let lower = line.to_lowercase();
@@ -1052,5 +1056,62 @@ mod tests {
     #[test]
     fn tag_matching_is_case_insensitive() {
         assert_eq!(clean_html("<P>Hi</P><SCRIPT>bad()</SCRIPT>", None), "Hi");
+    }
+
+    // ── PDF import, end to end ──────────────────────────────────────────────
+
+    /// Runs the real `parse_pdf_internal` over a directory of PDFs. Gated on an
+    /// environment variable so the default run stays hermetic:
+    ///
+    /// `DAZIJI_PDF_DIR='C:\path\to\pdfs' cargo test --no-default-features --lib -- --nocapture real_pdf_import`
+    ///
+    /// This is the only place the whole chain runs together — file read, text
+    /// extraction, newline collapsing, chapter splitting — so it is also the
+    /// check that extracted line breaks are good enough to find headings.
+    #[test]
+    fn real_pdf_import() {
+        let Ok(dir) = std::env::var("DAZIJI_PDF_DIR") else {
+            return;
+        };
+        let entries = std::fs::read_dir(&dir).expect("DAZIJI_PDF_DIR should be readable");
+
+        let mut checked = 0;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let is_pdf = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("pdf"));
+            if !is_pdf {
+                continue;
+            }
+
+            let name = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            match parse_pdf_internal(&path.to_string_lossy()) {
+                Ok((title, _author, chapters, _cover)) => {
+                    let total: usize = chapters.iter().map(|c| c.content.chars().count()).sum();
+                    println!(
+                        "OK   {} | title={:?} chapters={} chars={} first={:?}",
+                        name,
+                        title,
+                        chapters.len(),
+                        total,
+                        chapters.first().map(|c| c.title.clone()).unwrap_or_default(),
+                    );
+                    assert!(
+                        chapters.iter().any(|c| !c.content.trim().is_empty()),
+                        "{}: imported with no readable text",
+                        name
+                    );
+                }
+                Err(message) => println!("ERR  {} | {}", name, message),
+            }
+            checked += 1;
+        }
+        println!("checked {} PDF file(s) in {}", checked, dir);
     }
 }

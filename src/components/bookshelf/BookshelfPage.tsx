@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Plus, Library, Upload } from "lucide-react";
+import { Plus, Library, Upload, AlertTriangle, X } from "lucide-react";
 import { useBookStore } from "@/store";
 import { useBookImport } from "@/hooks/useBookImport";
 import { BookCard } from "./BookCard";
@@ -22,7 +22,7 @@ function isSupportedFile(path: string): boolean {
  */
 export function BookshelfPage() {
   const navigate = useNavigate();
-  const { books, setBooks } = useBookStore();
+  const { books, setBooks, importError, setImportError } = useBookStore();
   const { importBook, importFile } = useBookImport();
   const [isDragOver, setIsDragOver] = useState(false);
   const processedPaths = useRef<Set<string>>(new Set());
@@ -147,6 +147,21 @@ export function BookshelfPage() {
             </button>
           )}
         </div>
+
+        {/* Import failure — e.g. a scanned PDF that has no text layer to read */}
+        {importError && (
+          <div className="mb-8 flex items-start gap-3 rounded-lg border border-error/30 bg-error/[0.06] px-4 py-3">
+            <AlertTriangle size={18} className="mt-0.5 shrink-0 text-error" />
+            <p className="flex-1 text-sm text-ink leading-relaxed">{importError}</p>
+            <button
+              onClick={() => setImportError(null)}
+              aria-label="Dismiss"
+              className="shrink-0 rounded p-0.5 text-muted hover:text-ink transition-colors"
+            >
+              <X size={16} />
+            </button>
+          </div>
+        )}
 
         {/* Empty state */}
         {books.length === 0 && (

@@ -7,6 +7,8 @@ interface BookState {
   chapters: Chapter[];
   currentChapter: Chapter | null;
   isLoading: boolean;
+  /** Message from the last failed import, shown on the bookshelf. */
+  importError: string | null;
 
   // Actions
   setBooks: (books: Book[]) => void;
@@ -16,6 +18,7 @@ interface BookState {
   setChapters: (chapters: Chapter[]) => void;
   setCurrentChapter: (chapter: Chapter | null) => void;
   setIsLoading: (loading: boolean) => void;
+  setImportError: (message: string | null) => void;
 }
 
 export const useBookStore = create<BookState>((set) => ({
@@ -24,6 +27,7 @@ export const useBookStore = create<BookState>((set) => ({
   chapters: [],
   currentChapter: null,
   isLoading: false,
+  importError: null,
 
   setBooks: (books) => set({ books }),
   addBook: (book) => set((s) => ({ books: [book, ...s.books] })),
@@ -36,4 +40,5 @@ export const useBookStore = create<BookState>((set) => ({
   setChapters: (chapters) => set({ chapters }),
   setCurrentChapter: (chapter) => set({ currentChapter: chapter }),
   setIsLoading: (loading) => set({ isLoading: loading }),
+  setImportError: (message) => set({ importError: message }),
 }));
