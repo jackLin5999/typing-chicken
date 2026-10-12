@@ -494,6 +494,33 @@ pub async fn parse_pdf(file_path: String) -> Result<Vec<ParsedChapter>, String> 
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
+/// Find `needle` in `haystack`, ASCII-case-insensitively, returning a byte
+/// index into `haystack` itself.
+///
+/// The tempting version — `haystack.to_lowercase().find(needle)` — is wrong,
+/// because `to_lowercase` applies the full Unicode case mapping, which is
+/// allowed to change the byte length: `İ` (U+0130) is two bytes and lowercases
+/// to `i` + U+0307, three bytes, while `ẞ` (U+1E9E) shrinks from three to two.
+/// A match found in the lowercased copy then names a different offset in the
+/// original, and callers slice the original with it. The result is either a
+/// panic (`replace_range` and slicing demand char boundaries) or, worse,
+/// silently deleted text when the shifted offset happens to land on a boundary.
+///
+/// HTML tag names are pure ASCII, so a byte-wise comparison is the correct
+/// search. It also guarantees the returned index is a char boundary: every byte
+/// it can match is < 0x80, so the match cannot begin inside a multi-byte
+/// character.
+fn find_ascii_ci(haystack: &str, needle: &str) -> Option<usize> {
+    let needle = needle.as_bytes();
+    if needle.is_empty() {
+        return None;
+    }
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .position(|window| window.eq_ignore_ascii_case(needle))
+}
+
 /// Strip HTML tags and decode common entities, returning plain text.
 /// If `image_map` is provided, &lt;img&gt; tags are replaced with `[IMG:filename]`
 /// markers using the mapping from original src → extracted filename.
@@ -515,15 +542,16 @@ fn clean_html(html: &str, image_map: Option<&HashMap<String, String>>) -> String
         ("<head", "</head>"),
     ] {
         loop {
-            let lower = text.to_lowercase();
-            let start = match lower.find(open_tag) {
+            let start = match find_ascii_ci(&text, open_tag) {
                 Some(s) => s,
                 None => break,
             };
-            let end = match lower[start..].find(close_tag) {
+            let end = match find_ascii_ci(&text[start..], close_tag) {
                 Some(e) => start + e + close_tag.len(),
                 None => break,
             };
+            // Both offsets were found in `text` itself, so this is on char
+            // boundaries and cannot panic.
             text.replace_range(start..end, "");
         }
     }
@@ -621,11 +649,9 @@ fn decode_numeric(body: &str) -> Option<char> {
 fn replace_img_tags(html: &str, image_map: &HashMap<String, String>) -> String {
     let mut result = String::with_capacity(html.len());
     let mut remaining = html;
-    let lower_start = "<img";
 
     loop {
-        let lower = remaining.to_lowercase();
-        let start = match lower.find(lower_start) {
+        let start = match find_ascii_ci(remaining, "<img") {
             Some(s) => s,
             None => break,
         };
@@ -675,8 +701,7 @@ fn replace_img_tags(html: &str, image_map: &HashMap<String, String>) -> String {
 
 /// Extract the src attribute value from an <img> tag string.
 fn extract_src(tag: &str) -> Option<String> {
-    let lower = tag.to_lowercase();
-    let src_pos = lower.find("src")?;
+    let src_pos = find_ascii_ci(tag, "src")?;
     let after_src = &tag[src_pos + 3..];
     let after_equals = after_src.trim_start().strip_prefix('=')?;
     let after_equals = after_equals.trim_start();
@@ -708,10 +733,9 @@ fn replace_tag_with_newline(text: &str, tag: &str) -> String {
     let close_tag = format!("</{}>", tag);
 
     loop {
-        let lower = remaining.to_lowercase();
         // Find the earliest of <tag... or </tag>
-        let open_pos = lower.find(&open_start);
-        let close_pos = lower.find(&close_tag);
+        let open_pos = find_ascii_ci(remaining, &open_start);
+        let close_pos = find_ascii_ci(remaining, &close_tag);
 
         let (pos, skip) = match (open_pos, close_pos) {
             (None, None) => break,
@@ -989,5 +1013,44 @@ mod tests {
         // which is exactly the signal that selects the Latin fallback.
         let latin = [0x63u8, 0x61, 0x66, 0xE9];
         assert_eq!(decode_text(&latin), "café");
+    }
+
+    // ── Tag search ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn ascii_search_indexes_the_original_string() {
+        let s = "İ<script>";
+        assert_eq!(find_ascii_ci(s, "<script"), Some(2));
+        assert!(s[2..].starts_with("<script"));
+
+        // What the old code did: `İ` (two bytes) lowercases to `i` + U+0307
+        // (three), so the same search in that copy reports 3 — a byte later
+        // than the tag actually sits, because the copy grew by one.
+        assert_eq!(s.to_lowercase().find("<script"), Some(3));
+    }
+
+    #[test]
+    fn cleaning_survives_a_case_mapping_that_grows() {
+        // Regression: the script-removal loop lowercased the whole document,
+        // found the tag in that copy, then handed the offset to `replace_range`
+        // on the original. The `İ` shifted everything one byte right, putting
+        // the end offset inside the following CJK character — a panic, so the
+        // whole book failed to import.
+        assert_eq!(
+            clean_html("<p>İ</p><script>alert(1)</script>中文", None),
+            "İ\n中文"
+        );
+    }
+
+    #[test]
+    fn cleaning_survives_a_case_mapping_that_shrinks() {
+        // The mirror case: `ẞ` (U+1E9E, three bytes) lowercases to `ß` (two),
+        // shifting the offset backwards instead.
+        assert_eq!(clean_html("ẞ<script>x</script>中", None), "ẞ中");
+    }
+
+    #[test]
+    fn tag_matching_is_case_insensitive() {
+        assert_eq!(clean_html("<P>Hi</P><SCRIPT>bad()</SCRIPT>", None), "Hi");
     }
 }
