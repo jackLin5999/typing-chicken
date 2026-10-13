@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import type { TypingStats } from "@/types/typing";
-import { getImageMarkerLength, isWhitespace } from "@/lib/utils";
+import { getImageMarkerLength, isAutoSkipped, isPunctuation } from "@/lib/utils";
+import { useSettingsStore } from "./settingsSlice";
 
 interface TypingState {
   isActive: boolean;
@@ -26,8 +27,12 @@ interface TypingState {
   resumeSession: () => void;
   endSession: () => void;
   advanceCursor: (correct: boolean) => void;
-  /** Advance cursor without counting as a keystroke (used for whitespace auto-skip). */
-  skipWhitespace: () => void;
+  /**
+   * Move the cursor one position forward without counting a keystroke — the
+   * shared step used by every auto-skip loop (whitespace, 跳过标点, IME
+   * newlines). Image markers are consumed by the step as well.
+   */
+  skipUncounted: () => void;
   updateStats: (partial: Partial<TypingStats>) => void;
   /** Backspace — move cursor back & revert stats for the undone character. */
   backspace: () => void;
@@ -52,6 +57,29 @@ function skipMarkersAt(text: string, index: number): number {
   let idx = index;
   while (idx < text.length && getImageMarkerLength(text, idx) > 0) {
     idx += getImageMarkerLength(text, idx);
+  }
+  return idx;
+}
+
+/** Read the 跳过标点 flag at call time, so a mid-session toggle applies at once. */
+function skipPunctuation(): boolean {
+  return useSettingsStore.getState().skipPunctuation;
+}
+
+/**
+ * Where the cursor lands when it moves forward from `index`: past image
+ * markers, and past punctuation too while 跳过标点 is on.
+ *
+ * Whitespace is deliberately NOT in this set. The cursor has always been
+ * allowed to rest on it — the engine's skip loop clears it on the next
+ * keystroke, and pressing Enter jumps a whole paragraph break at once.
+ */
+function landingIndex(text: string, index: number, skipPunct: boolean): number {
+  let idx = skipMarkersAt(text, index);
+  if (skipPunct) {
+    while (idx < text.length && isPunctuation(text[idx])) {
+      idx = skipMarkersAt(text, idx + 1);
+    }
   }
   return idx;
 }
@@ -85,7 +113,7 @@ export const useTypingStore = create<TypingState>((set) => ({
       ...INITIAL,
       isActive: true,
       targetText: text,
-      cursorIndex: skipMarkersAt(text, 0),
+      cursorIndex: landingIndex(text, 0, skipPunctuation()),
     }),
 
   pauseSession: () => set({ isPaused: true }),
@@ -95,8 +123,11 @@ export const useTypingStore = create<TypingState>((set) => ({
   advanceCursor: (correct) =>
     set((s) => {
       const rawIndex = s.cursorIndex + 1;
-      // Auto-skip past any [IMG:...] image markers
-      const newIndex = skipMarkersAt(s.targetText, rawIndex);
+      // Auto-skip past image markers, and past punctuation while 跳过标点 is on.
+      // Skipping punctuation here (rather than waiting for the next keystroke)
+      // is what lets a chapter that ends in 「。」 still complete on its last
+      // real character.
+      const newIndex = landingIndex(s.targetText, rawIndex, skipPunctuation());
       const total = s.stats.totalKeystrokes + 1;
       const correctTotal = s.stats.correctKeystrokes + (correct ? 1 : 0);
       const ch = s.targetText[s.cursorIndex];
@@ -123,7 +154,7 @@ export const useTypingStore = create<TypingState>((set) => ({
       };
     }),
 
-  skipWhitespace: () =>
+  skipUncounted: () =>
     set((s) => {
       const rawIndex = s.cursorIndex + 1;
       const newIndex = skipMarkersAt(s.targetText, rawIndex);
@@ -139,15 +170,15 @@ export const useTypingStore = create<TypingState>((set) => ({
     })),
 
   /** Backspace: move cursor back one position and revert stats if the undone
-   *  character was a real keystroke (not auto-skipped whitespace). */
+   *  character was a real keystroke (not auto-skipped whitespace/punctuation). */
   backspace: () =>
     set((s) => {
       if (s.cursorIndex <= 0) return {};
       const prevIdx = s.cursorIndex - 1;
       const charAtPrev = s.targetText[prevIdx];
 
-      // Whitespace characters were auto-skipped — no stat to revert
-      if (charAtPrev !== undefined && isWhitespace(charAtPrev)) {
+      // Auto-skipped characters were never a keystroke — nothing to revert
+      if (isAutoSkipped(charAtPrev, skipPunctuation())) {
         return {
           cursorIndex: prevIdx,
           incorrectIndices: s.incorrectIndices.filter((i) => i < prevIdx),
@@ -184,10 +215,15 @@ export const useTypingStore = create<TypingState>((set) => ({
     }),
 
   setCursorIndex: (index) =>
-    set((s) => ({
-      cursorIndex: index,
-      incorrectIndices: s.incorrectIndices.filter((i) => i < index),
-    })),
+    set((s) => {
+      // Restored progress can land on punctuation that 跳过标点 now travels
+      // over — step to the first character the user actually has to type.
+      const cursorIndex = landingIndex(s.targetText, index, skipPunctuation());
+      return {
+        cursorIndex,
+        incorrectIndices: s.incorrectIndices.filter((i) => i < cursorIndex),
+      };
+    }),
 
   setIncorrectIndices: (indices) =>
     set({ incorrectIndices: indices }),

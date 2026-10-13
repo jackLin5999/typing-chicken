@@ -1,7 +1,7 @@
 import { useEffect, useRef, useCallback } from "react";
 import type { MutableRefObject } from "react";
-import { useTypingStore } from "@/store";
-import { isWhitespace } from "@/lib/utils";
+import { useSettingsStore, useTypingStore } from "@/store";
+import { isAutoSkipped, isPunctuation } from "@/lib/utils";
 
 export interface TypingEngineOptions {
   /**
@@ -129,6 +129,38 @@ export function useTypingEngine(options: TypingEngineOptions = {}) {
     }
   }, []);
 
+  // ── Auto-skip ─────────────────────────────────────────────────────────
+
+  const skipPunctuation = useSettingsStore((s) => s.skipPunctuation);
+
+  /**
+   * Walk the cursor over everything the user is not asked to type at its
+   * current position: whitespace always, punctuation too in 跳过标点 mode.
+   *
+   * Most of the time there is nothing to do — `typingSlice` already lands the
+   * cursor past punctuation on every advance. This covers the rest: backspacing
+   * onto a mark, restoring saved progress, and switching the mode on mid-sentence.
+   *
+   * The flag is read from the store rather than closed over, so this stays a
+   * stable callback however often the toggle flips.
+   */
+  const skipAutoSkippable = useCallback(() => {
+    const skipPunct = useSettingsStore.getState().skipPunctuation;
+    let state = useTypingStore.getState();
+    let expected = state.targetText[state.cursorIndex];
+    while (isAutoSkipped(expected, skipPunct)) {
+      state.skipUncounted();
+      state = useTypingStore.getState();
+      expected = state.targetText[state.cursorIndex];
+    }
+  }, []);
+
+  // Turning 跳过标点 on moves the cursor off whatever mark it was about to ask
+  // for, instead of leaving the highlight there until the next keystroke.
+  useEffect(() => {
+    if (skipPunctuation) skipAutoSkippable();
+  }, [skipPunctuation, skipAutoSkippable]);
+
   // ── Text input processing ─────────────────────────────────────────────
 
   /**
@@ -154,17 +186,19 @@ export function useTypingEngine(options: TypingEngineOptions = {}) {
       let expected = state.targetText[state.cursorIndex];
       if (expected === undefined) break; // reached end of text
 
-      // Auto-skip all consecutive whitespace before processing input
-      while (isWhitespace(expected)) {
-        state.skipWhitespace();
-        state = useTypingStore.getState();
-        expected = state.targetText[state.cursorIndex];
-        if (expected === undefined) break;
-      }
+      // Auto-skip everything the user isn't asked to type, so the comparison
+      // below is always against the next character they do have to type.
+      skipAutoSkippable();
+      state = useTypingStore.getState();
+      expected = state.targetText[state.cursorIndex];
 
       // Enter / newline / space: whitespace triggers are only for skipping,
       // not for comparing against the next visible character
       if (char === "\n" || char === " ") continue;
+
+      // 跳过标点: a mark typed out of habit is dropped instead of being scored
+      // against the next character — the cursor is already past it.
+      if (useSettingsStore.getState().skipPunctuation && isPunctuation(char)) continue;
 
       if (expected === undefined) break;
 
@@ -200,7 +234,8 @@ export function useTypingEngine(options: TypingEngineOptions = {}) {
    * - Escape: end the session
    * - Backspace: move cursor back one position
    * - Space: auto-input the current character as correct (skip)
-   * - Enter: auto-skip whitespace to jump to next paragraph
+   * - Enter: auto-skip whitespace (and, in 跳过标点 mode, punctuation) to
+   *   jump to the next character that actually has to be typed
    */
   const handleKeydown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -218,20 +253,18 @@ export function useTypingEngine(options: TypingEngineOptions = {}) {
         // Don't interfere with IME composition (space confirms candidate)
         if (isComposingRef.current) return;
 
-        let state = useTypingStore.getState();
+        const state = useTypingStore.getState();
         if (!state.isActive || state.isPaused) return;
 
-        // Skip current character as correct (auto-input)
-        state.advanceCursor(true);
+        // Clear anything auto-skipped the cursor is resting on (a mark it
+        // backed onto, say) so this press is spent on a real character.
+        skipAutoSkippable();
 
-        // Auto-skip any following whitespace until we hit visible text
-        state = useTypingStore.getState();
-        let expected = state.targetText[state.cursorIndex];
-        while (isWhitespace(expected)) {
-          state.skipWhitespace();
-          state = useTypingStore.getState();
-          expected = state.targetText[state.cursorIndex];
-        }
+        // Skip current character as correct (auto-input)
+        useTypingStore.getState().advanceCursor(true);
+
+        // Then run up to the next character that has to be typed
+        skipAutoSkippable();
         return;
       }
 
@@ -243,13 +276,9 @@ export function useTypingEngine(options: TypingEngineOptions = {}) {
         const state = useTypingStore.getState();
         if (!state.isActive || state.isPaused) return;
 
-        // Auto-skip ALL consecutive whitespace until we hit visible text
-        let expected = state.targetText[state.cursorIndex];
-        while (isWhitespace(expected)) {
-          state.skipWhitespace();
-          const next = useTypingStore.getState();
-          expected = next.targetText[next.cursorIndex];
-        }
+        // Jump to the next character the user has to type — this is how a
+        // paragraph break (and, in 跳过标点 mode, a run of marks) is crossed.
+        skipAutoSkippable();
         return;
       }
     },

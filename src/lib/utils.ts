@@ -24,6 +24,31 @@ export function isWhitespace(ch: string | undefined): boolean {
 }
 
 /**
+ * True for characters the engine skips while 「跳过标点」 is on.
+ *
+ * Matches the Unicode general categories P (punctuation) and S (symbols)
+ * instead of a hardcoded list. That covers the CJK forms real books use
+ * (，。！？、；：（）《》「」【】—…), their ASCII counterparts (, . ! ? ; :), and
+ * the stray symbols that turn up in prose (～ × ÷ ° ￥ ©). Letters, digits and
+ * CJK ideographs are in neither category, so nothing the user must actually
+ * type is lost.
+ */
+export function isPunctuation(ch: string | undefined): boolean {
+  return ch !== undefined && /[\p{P}\p{S}]/u.test(ch);
+}
+
+/**
+ * True for characters the engine passes over without the user pressing
+ * anything: whitespace always, punctuation too while 「跳过标点」 is on.
+ */
+export function isAutoSkipped(
+  ch: string | undefined,
+  skipPunctuation: boolean,
+): boolean {
+  return isWhitespace(ch) || (skipPunctuation && isPunctuation(ch));
+}
+
+/**
  * Segment text into an array of characters for rendering, preserving newlines.
  */
 export function segmentText(text: string): string[] {

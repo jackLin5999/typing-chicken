@@ -1,4 +1,4 @@
-import { ArrowLeft, ChevronLeft, ChevronRight, List, Type, Sun, Moon, BookOpen, Minus, Plus, Pause, Play, RotateCcw, Languages } from "lucide-react";
+import { ArrowLeft, ChevronLeft, ChevronRight, List, Type, Sun, Moon, BookOpen, Minus, Plus, Pause, Play, RotateCcw, Languages, PilcrowSquare } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { useSettingsStore, useTypingStore } from "@/store";
 import type { Theme, FontFamily, FontSize } from "@/types/settings";
@@ -36,7 +36,7 @@ interface ReaderControlsProps {
  * Floating control bar for the reader/typing view:
  * - Back to library, chapter navigation
  * - Session transport: continue / pause / restart-this-chapter
- * - Pinyin toggle
+ * - Typing assists: pinyin, skip-punctuation
  * - Theme toggle (Light / Sepia / Dark)
  * - Font family & size
  */
@@ -61,6 +61,8 @@ export function ReaderControls({
   const resumeSession = useTypingStore((s) => s.resumeSession);
   const showPinyin = useSettingsStore((s) => s.showPinyin);
   const setShowPinyin = useSettingsStore((s) => s.setShowPinyin);
+  const skipPunctuation = useSettingsStore((s) => s.skipPunctuation);
+  const setSkipPunctuation = useSettingsStore((s) => s.setSkipPunctuation);
 
   return (
     <div
@@ -153,6 +155,20 @@ export function ReaderControls({
         title="Toggle Pinyin"
       >
         <Languages size={15} />
+      </button>
+
+      {/* Skip-punctuation toggle — the cursor travels over ，。！？ by itself */}
+      <button
+        onClick={() => setSkipPunctuation(!skipPunctuation)}
+        className={`p-2 rounded-lg transition-colors ${
+          skipPunctuation
+            ? "bg-accent/10 text-accent"
+            : "text-muted hover:bg-surface-hover"
+        }`}
+        aria-label="Skip Punctuation"
+        title={skipPunctuation ? "跳过标点：已开启（标点自动跳过）" : "跳过标点：打开后不用打标点符号"}
+      >
+        <PilcrowSquare size={15} />
       </button>
 
       <div className="w-px h-5 bg-surface-hover mx-1" />
