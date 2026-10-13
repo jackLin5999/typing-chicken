@@ -15,6 +15,11 @@ export interface Book {
   incorrectPositions: string;
   /** Filename of the extracted cover image (null if none). */
   coverImage: string | null;
+  /**
+   * Gutendex id when this book was downloaded from 书库 — lets the browser
+   * mark it as already added. Null for locally imported files.
+   */
+  sourceId: string | null;
 }
 
 /** A single chapter within a book. */

@@ -1,7 +1,7 @@
 mod commands;
 mod db;
 
-use commands::{import, parser, storage};
+use commands::{gutendex, import, parser, storage};
 use db::Database;
 use std::sync::Mutex;
 use tauri::Manager;
@@ -74,6 +74,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             import::open_file_dialog,
             import::import_book,
+            import::resolve_import_paths,
+            gutendex::search_gutendex,
+            gutendex::download_and_import_book,
             storage::get_all_books,
             storage::get_book_chapters,
             storage::get_chapter_content,
@@ -81,6 +84,8 @@ pub fn run() {
             storage::get_progress,
             storage::delete_book,
             storage::get_image_data,
+            storage::get_settings,
+            storage::set_setting,
             parser::parse_epub,
             parser::parse_txt,
             parser::parse_pdf,

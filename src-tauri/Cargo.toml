@@ -28,3 +28,22 @@ uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 base64 = "0.22"
 encoding_rs = "0.8"
+# 内置书库：Gutendex 搜索 + 从 Project Gutenberg 下载公版 EPUB。
+# 刻意关掉默认特性：
+#   - system-proxy 手动开回来 —— 它会读 Windows 注册表的代理设置，
+#     这样「系统代理开了就用、关了就直连」，不必在应用里做代理设置界面。
+#   - 默认的 default-tls 在 0.13 走 rustls/aws-lc-rs，Windows 上要 C 工具链；
+#     显式换 native-tls 走 schannel，用系统证书库，零配置。
+#   - 不开 http2（Gutendex/Gutenberg 用 HTTP/1.1 即可），少拉一个 h2。
+reqwest = { version = "0.13", default-features = false, features = [
+    "json",
+    "system-proxy",
+    "native-tls",
+] }
+# 只为下载重试之间的退避 —— tokio 本来就是 tauri 的传递依赖，声明它不增加构建成本。
+# 用 tokio::time::sleep 而不是 std::thread::sleep：后者会阻塞异步执行器。
+tokio = { version = "1", features = ["time"] }
+# 繁→简转换。Project Gutenberg 的中文书**几乎全是繁体**（实测抽样 20 本，特征字比例 1:38），
+# 对大陆用户来说不转换基本没法拿来练打字。zhconv 用 MediaWiki + OpenCC 规则集，
+# 内置约 0.6MB 词表，线性时间转换。
+zhconv = "0.4"

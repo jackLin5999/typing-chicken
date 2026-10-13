@@ -6,6 +6,26 @@ pub struct Database {
     books_dir: PathBuf,
 }
 
+/// Borrowed input for a book row — avoids cloning every chapter's text twice.
+pub struct NewBook<'a> {
+    pub id: &'a str,
+    pub title: &'a str,
+    pub author: &'a str,
+    pub file_path: &'a str,
+    pub file_type: &'a str,
+    pub chapter_count: i32,
+    pub total_words: i32,
+    pub cover_image: Option<&'a str>,
+    /// Gutendex id when imported from 书库; `None` for local files.
+    pub source_id: Option<&'a str>,
+}
+
+pub struct NewChapter<'a> {
+    pub title: &'a str,
+    pub content: &'a str,
+    pub level: i32,
+}
+
 impl Database {
     /// Open (or create) the SQLite database and run migrations.
     pub fn new(db_path: &Path) -> Result<Self> {
@@ -94,6 +114,17 @@ impl Database {
             )?;
         }
 
+        // Migration: add source_id for books imported from the 书库 (Gutendex id).
+        // NULL means a locally-imported file. 可空列，旧数据自动是 NULL。
+        let has_source_col: bool = conn
+            .prepare("SELECT COUNT(*) FROM pragma_table_info('books') WHERE name='source_id'")
+            .and_then(|mut stmt| stmt.query_row([], |row| row.get::<_, i32>(0)))
+            .map(|count| count > 0)
+            .unwrap_or(false);
+        if !has_source_col {
+            conn.execute_batch("ALTER TABLE books ADD COLUMN source_id TEXT;")?;
+        }
+
         Ok(Self { conn, books_dir })
     }
 
@@ -103,30 +134,61 @@ impl Database {
 
     // ── Book CRUD ─────────────────────────────────────────────────────
 
-    pub fn insert_book(
+    /// Write a book and all of its chapters in a single transaction, so a
+    /// failure part-way through cannot leave a half-imported book behind.
+    ///
+    /// Uses `unchecked_transaction` (takes `&self`) rather than `transaction`
+    /// (which needs `&mut self`); the app has one connection behind one mutex
+    /// and never nests transactions, so this is safe.
+    pub fn insert_book_with_chapters(
         &self,
-        id: &str,
-        title: &str,
-        author: &str,
-        file_path: &str,
-        file_type: &str,
-        chapter_count: i32,
-        total_words: i32,
-        cover_image: Option<&str>,
+        book: &NewBook<'_>,
+        chapters: &[NewChapter<'_>],
     ) -> Result<()> {
-        self.conn.execute(
-            "INSERT INTO books (id, title, author, file_path, file_type, chapter_count, total_words, cover_image)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            rusqlite::params![id, title, author, file_path, file_type, chapter_count, total_words, cover_image],
+        let tx = self.conn.unchecked_transaction()?;
+
+        tx.execute(
+            "INSERT INTO books (id, title, author, file_path, file_type, chapter_count,
+                                total_words, cover_image, source_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![
+                book.id,
+                book.title,
+                book.author,
+                book.file_path,
+                book.file_type,
+                book.chapter_count,
+                book.total_words,
+                book.cover_image,
+                book.source_id,
+            ],
         )?;
-        Ok(())
+
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO chapters (id, book_id, title, index_order, content, level)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )?;
+            for (idx, chapter) in chapters.iter().enumerate() {
+                stmt.execute(rusqlite::params![
+                    uuid::Uuid::new_v4().to_string(),
+                    book.id,
+                    chapter.title,
+                    idx as i32,
+                    chapter.content,
+                    chapter.level,
+                ])?;
+            }
+        }
+
+        tx.commit()
     }
 
     pub fn get_all_books(&self) -> Result<Vec<super::commands::storage::BookEntry>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, title, author, file_path, file_type, chapter_count,
                     total_words, current_chapter, current_position, progress_pct,
-                    cover_image, created_at, incorrect_positions
+                    cover_image, created_at, incorrect_positions, source_id
              FROM books ORDER BY created_at DESC",
         )?;
 
@@ -145,27 +207,11 @@ impl Database {
                 cover_image: row.get(10)?,
                 created_at: row.get(11)?,
                 incorrect_positions: row.get(12)?,
+                source_id: row.get(13)?,
             })
         })?;
 
         rows.collect()
-    }
-
-    pub fn insert_chapter(
-        &self,
-        id: &str,
-        book_id: &str,
-        title: &str,
-        index_order: i32,
-        content: &str,
-        level: i32,
-    ) -> Result<()> {
-        self.conn.execute(
-            "INSERT INTO chapters (id, book_id, title, index_order, content, level)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![id, book_id, title, index_order, content, level],
-        )?;
-        Ok(())
     }
 
     pub fn get_chapters(
@@ -232,11 +278,69 @@ impl Database {
         )
     }
 
+    // ── Settings ──────────────────────────────────────────────────────
+
+    /// Read every stored setting. Missing keys are simply absent — callers
+    /// keep their own defaults for anything not returned.
+    pub fn get_settings(&self) -> Result<Vec<(String, String)>> {
+        let mut stmt = self.conn.prepare("SELECT key, value FROM settings")?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect()
+    }
+
+    /// Upsert one setting.
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            rusqlite::params![key, value],
+        )?;
+        Ok(())
+    }
+
     pub fn delete_book(&self, book_id: &str) -> Result<()> {
         self.conn
             .execute("DELETE FROM chapters WHERE book_id = ?1", rusqlite::params![book_id])?;
         self.conn
             .execute("DELETE FROM books WHERE id = ?1", rusqlite::params![book_id])?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 「持久化」的定义就是关掉再打开还在 —— 所以这个用例**真的重开一次数据库**，
+    /// 而不是只验证同一个连接里读得回来。
+    #[test]
+    fn settings_survive_reopening_the_database() {
+        let dir = std::env::temp_dir().join(format!("daziji-settings-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("test.db");
+
+        {
+            let db = Database::new(&db_path).unwrap();
+            // 全新的库应该是空的 —— 前端靠这一点来判断「用默认值」
+            assert!(db.get_settings().unwrap().is_empty());
+
+            db.set_setting("theme", "\"dark\"").unwrap();
+            db.set_setting("convertToSimplified", "false").unwrap();
+            // 同一个 key 写第二次应该是覆盖，不是插两条
+            db.set_setting("theme", "\"sepia\"").unwrap();
+        }
+
+        let reopened = Database::new(&db_path).unwrap();
+        let settings: std::collections::HashMap<String, String> =
+            reopened.get_settings().unwrap().into_iter().collect();
+
+        assert_eq!(settings.len(), 2, "覆盖写不该留下第二条记录");
+        assert_eq!(settings.get("theme").map(String::as_str), Some("\"sepia\""));
+        assert_eq!(
+            settings.get("convertToSimplified").map(String::as_str),
+            Some("false")
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

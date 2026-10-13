@@ -7,7 +7,7 @@ import { useBookStore } from "@/store";
  * or a compact button when books already exist.
  */
 export function ImportZone() {
-  const { importBook } = useBookImport();
+  const { importBooks } = useBookImport();
   const books = useBookStore((s) => s.books);
   const isLoading = useBookStore((s) => s.isLoading);
 
@@ -17,7 +17,7 @@ export function ImportZone() {
 
   return (
     <button
-      onClick={importBook}
+      onClick={() => void importBooks()}
       disabled={isLoading}
       className="
         group flex flex-col items-center justify-center gap-4

@@ -183,6 +183,25 @@ pub fn parse_epub_internal(
         walk_toc_nodes(&mut book, &toc_tree, &spine, 0, &mut chapters, image_map.as_ref());
     }
 
+    // ── Strategy 1.5: TOC 指向全书时用它救回来 ──────────────────────────
+    // 有些书（尤其 Project Gutenberg 的中文古典小说）TOC 只有 2-3 个 navPoint
+    // ——书名 + 许可证——比没有 TOC 还糟：Strategy 1 会「成功」返回两章，
+    // 于是 Strategy 2 根本不会跑，整本《西遊記》就变成 2 章。
+    // 判据：章节数明显配不上正文字数时，直接按正文标题重切。
+    const MIN_PLAUSIBLE_CHAPTERS: usize = 5;
+    const MIN_RECOVER_CHARS: usize = 50_000;
+
+    if chapters.len() < MIN_PLAUSIBLE_CHAPTERS {
+        let full_text = collect_spine_text(&mut book, &spine, image_map.as_ref());
+        if full_text.chars().count() > MIN_RECOVER_CHARS {
+            let resplit = split_into_chapters(&full_text);
+            // 只在确实切得更多时才替换，避免把正常的少章短篇改坏
+            if resplit.len() > chapters.len() {
+                chapters = resplit;
+            }
+        }
+    }
+
     // ── Strategy 2: TOC produced nothing → spine-based fallback ────────
     if chapters.is_empty() {
         let mut spine_chapters: Vec<(String, String, usize)> = Vec::new();
@@ -192,8 +211,12 @@ pub fn parse_epub_internal(
                 .get_resource(resource_id)
                 .or_else(|_| book.get_resource_by_path(resource_id))
             {
-                let text = clean_html(&String::from_utf8_lossy(&raw), image_map.as_ref());
+                // 在每个文件**内部**裁掉 Gutenberg 的版权页/许可声明。
+                // 不能整个文件跳过：版权页和正文开头往往同处一个 chunk。
+                let cleaned = clean_html(&String::from_utf8_lossy(&raw), image_map.as_ref());
+                let text = strip_gutenberg_markers(&cleaned);
                 if text.trim().is_empty() { continue; }
+                let text = text.to_string();
 
                 let fallback_title = Path::new(resource_id)
                     .file_stem()
@@ -203,7 +226,8 @@ pub fn parse_epub_internal(
 
                 let subs = split_into_chapters(&text);
                 if subs.len() <= 1 {
-                    spine_chapters.push((fallback_title, text, 0));
+                    // 整块没切出标题 → 当作一章，但正文同样要还原折行
+                    spine_chapters.push((fallback_title, unwrap_wrapped_lines(&text), 0));
                 } else {
                     for sub in subs {
                         spine_chapters.push((sub.title, sub.content, sub.level));
@@ -238,16 +262,7 @@ pub fn parse_epub_internal(
 
     // ── Strategy 3: Everything failed → dump full text ──────────────────
     if chapters.is_empty() {
-        let mut all_text = String::new();
-        for resource_id in &spine {
-            if let Ok(raw) = book
-                .get_resource(resource_id)
-                .or_else(|_| book.get_resource_by_path(resource_id))
-            {
-                all_text.push_str(&clean_html(&String::from_utf8_lossy(&raw), image_map.as_ref()));
-                all_text.push_str("\n\n");
-            }
-        }
+        let all_text = collect_spine_text(&mut book, &spine, image_map.as_ref());
         let chapters_from_text = split_into_chapters(&all_text);
         if !chapters_from_text.is_empty() {
             chapters = chapters_from_text;
@@ -256,13 +271,41 @@ pub fn parse_epub_internal(
         }
     }
 
+    // 兜底：按内容丢掉 Gutenberg 的书名页与许可声明。
+    // 上面按 id 拦过一道，但 TOC 路径（Strategy 1）绕过那两道过滤，
+    // 而且别的工具重排过的 EPUB 可能换了 id —— 这里统一收口。
+    chapters.retain(|c| !is_gutenberg_boilerplate_text(&c.content));
+
     Ok((title, author, chapters, cover_image))
+}
+
+/// 把 spine 里的所有文档清洗后拼成一整段全文。
+/// Strategy 1.5（TOC 不可用时重切）与 Strategy 3（兜底 dump）共用。
+fn collect_spine_text(
+    book: &mut epub::doc::EpubDoc<std::io::Cursor<Vec<u8>>>,
+    spine: &[String],
+    image_map: Option<&HashMap<String, String>>,
+) -> String {
+    let mut all_text = String::new();
+    for resource_id in spine {
+        if let Ok(raw) = book
+            .get_resource(resource_id)
+            .or_else(|_| book.get_resource_by_path(resource_id))
+        {
+            // 同 Strategy 2：在文件内部裁标记，不整个文件跳过
+            let cleaned = clean_html(&String::from_utf8_lossy(&raw), image_map);
+            all_text.push_str(strip_gutenberg_markers(&cleaned));
+            all_text.push_str("\n\n");
+        }
+    }
+    all_text
 }
 
 /// Parse a TXT file — infer chapter breaks from common patterns.
 pub fn parse_txt_internal(file_path: &str) -> Result<(String, String, Vec<ParsedChapter>, Option<String>), String> {
     let bytes = fs::read(file_path).map_err(|e| e.to_string())?;
-    let content = decode_text(&bytes);
+    let decoded = decode_text(&bytes);
+    let content = strip_gutenberg_markers(&decoded);
 
     let title = Path::new(file_path)
         .file_stem()
@@ -272,7 +315,7 @@ pub fn parse_txt_internal(file_path: &str) -> Result<(String, String, Vec<Parsed
 
     let author = "Unknown Author".to_string();
 
-    let chapters = split_into_chapters(&content);
+    let chapters = split_into_chapters(content);
 
     Ok((title, author, chapters, None))
 }
@@ -528,6 +571,9 @@ fn clean_html(html: &str, image_map: Option<&HashMap<String, String>>) -> String
     let mut text = html.trim_start_matches('\u{FEFF}').to_string();
 
     // ── Step 0: Replace <img> tags with [IMG:...] markers ────────────
+    // 注意：**不要**在这里折行还原（见 unwrap_wrapped_lines 的注释）。
+    // 有些书的 chunk 是纯文本转过来的，换行是它唯一的结构 ——
+    // 提前还原会把整章压成一行，章节标题再也找不到行首，分章直接崩掉。
     if let Some(map) = image_map {
         text = replace_img_tags(&text, map);
     }
@@ -571,8 +617,214 @@ fn clean_html(html: &str, image_map: Option<&HashMap<String, String>>) -> String
     text.trim().to_string()
 }
 
-/// Decode HTML character references in a single left-to-right pass.
+/// ⚠️ 不要按 spine 的资源 id 判断「整个文件都是样板」。
 ///
+/// 曾经这么干过：把 `pg-header` / `pg-footer` 两个 id 整个跳过。
+/// 结果《紅樓夢》掉了一大半正文 —— 实测 `pg-header` 那个文件长 85,228 字，
+/// 而 `*** START OF THE PROJECT GUTENBERG ***` 标记在第 **836** 字，
+/// 也就是说前面 836 字是版权页，**后面 8 万多字是真正的小说开头**。
+/// `pg-footer` 同理：END 标记几乎就在文件开头。
+///
+/// 正解是**在文件内部按标记裁**（见 `strip_gutenberg_markers`），
+/// 而不是按 id 丢文件。
+
+/// 繁体 → 简体。
+///
+/// 为什么要这一步：Project Gutenberg 的中文书**几乎全是繁体**
+/// （实测：抓下全部 444 本中文书的纯文本，抽样 20 本统计特征字 —
+///  简体特征字命中 16,732 次，繁体特征字命中 632,589 次，比例约 1:38，
+///  20 本全部判定为繁体）。对大陆用户来说不转换基本没法拿来练打字。
+///
+/// 用 `zhconv`（MediaWiki + OpenCC 规则集，词级而非字级，所以「頭髮」→「头发」
+/// 而不是「头发」错成「头發」这类问题能避开）。已是简体或纯拉丁的文本过一遍是恒等的，
+/// 可以无脑调用。
+pub(crate) fn to_simplified(text: &str) -> String {
+    zhconv::zhconv(text, zhconv::Variant::ZhHans)
+}
+
+/// 去掉纯文本版 Gutenberg 的页眉页脚。
+///
+/// 纯文本用 `*** START OF THE PROJECT GUTENBERG EBOOK … ***` 与
+/// `*** END OF … ***` 两行标记正文边界，标记之外全是制作信息和许可声明。
+/// 没找到标记就原样返回（不是 Gutenberg 的书不受影响）。
+fn strip_gutenberg_markers(text: &str) -> &str {
+    let mut body = text;
+
+    if let Some(pos) = find_ascii_ci(body, "*** START OF THE PROJECT GUTENBERG") {
+        // 切到标记所在行的行尾之后
+        if let Some(line_end) = body[pos..].find('\n') {
+            body = &body[pos + line_end + 1..];
+        }
+    }
+
+    if let Some(pos) = find_ascii_ci(body, "*** END OF THE PROJECT GUTENBERG") {
+        body = &body[..pos];
+    }
+
+    body.trim()
+}
+
+/// 整段都是 Gutenberg 样板文字吗（书名页 / 许可声明）。
+///
+/// 按 id 拦是第一道防线；这里按内容兜底 —— 别的工具重排过的 EPUB 可能换了 id，
+/// 但那两段文字始终在。只看开头 600 字，避免正文里偶然提到 Gutenberg 被误伤。
+fn is_gutenberg_boilerplate_text(text: &str) -> bool {
+    let head: String = text
+        .chars()
+        .take(600)
+        .collect::<String>()
+        .to_ascii_lowercase();
+
+    head.contains("the project gutenberg ebook of")
+        || head.contains("start of the project gutenberg")
+        || head.contains("end of the project gutenberg")
+        || head.contains("project gutenberg license")
+        || (head.contains("gutenberg") && head.contains("limited warranty"))
+}
+
+/// 是否「中文语境」的字符 —— 汉字/假名/谚文，外加**中文标点**。
+///
+/// 标点必须算进来：断行经常正好落在「。」「」之前或之后，
+/// 不认它们就会在中文句子里插出一个多余的空格。
+fn is_cjk_ish(c: char) -> bool {
+    let cp = c as u32;
+    is_cjk(c)
+        || (0x3000..=0x303F).contains(&cp) // 中文标点 。、「」《》…
+        || (0xFF00..=0xFFEF).contains(&cp) // 全角字符 ，？！：；
+        || (0x2018..=0x201D).contains(&cp) // 弯引号 ‘ ’ “ ”
+        || c == '—'
+        || c == '…'
+}
+
+/// 把「硬折行」还原成整段 —— **必须在分出章节之后**再调用。
+///
+/// Project Gutenberg 的排版源文本是硬折行的（实测《西遊記》正文：行长度中位数 35 字，
+/// 78.9% 的行落在 30–45 字），生成的 EPUB 里一行就是一句的中间，不还原的话
+/// 满屏都是断在句子中间的换行 —— 这就是「格式很乱」的主因。
+///
+/// 但**不能提前到 `clean_html` 里做**。实测《紅樓夢》的 12 个 chunk 排版并不一致：
+/// 有的每段一个 `<p>`（`<p>` 才是结构，换行只是折行），
+/// 有的整个 chunk 只有 6 个 `<p>`、却有 3106 个换行（**换行才是唯一结构**）。
+/// 提前还原会把后者 88KB 的正文压成几行，章节标题再也不是行首，分章从 130 章崩到 42 章。
+///
+/// 所以规则是：
+/// - **单个**换行 = 排版折行 → 两侧都是中文就删掉，否则补一个空格
+/// - **连续两个以上**换行 = 真正的段落分隔 → 保留
+///
+/// 注意：`<pre>` 里的换行是有意义的，这里会被一并抹平。Gutenberg 的韵文用 `<br/>`
+/// 分行（保留为单个换行 → 会被还原），所以韵文会合成一段 —— 这是已知取舍。
+fn unwrap_wrapped_lines(text: &str) -> String {
+    // 先干掉「整行都是装饰符」的分隔线 —— 实测《紅樓夢》每个回目后面都跟着
+    // 一整行破折号，留着的话用户得敲四十个「—」。
+    // 换成空行而不是删掉，这样夹在正文中间时仍算段落分隔，不会把两段粘起来。
+    let text: String = text
+        .lines()
+        .map(|l| if is_decoration_line(l) { "" } else { l })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut last_visible: Option<char> = None;
+    let mut i = 0;
+
+    while i < chars.len() {
+        let c = chars[i];
+
+        if c == '\n' || c == '\r' {
+            // 吃掉「换行 + 随后的缩进」，只数其中真正的换行个数
+            let mut newlines = 0;
+            while i < chars.len() && chars[i].is_whitespace() {
+                if chars[i] == '\n' {
+                    newlines += 1;
+                }
+                i += 1;
+            }
+            let next_visible = chars.get(i).copied();
+
+            if newlines >= 2 {
+                // 真正的段落分隔
+                out.push('\n');
+                last_visible = Some('\n');
+            } else {
+                let joins_tight = matches!(
+                    (last_visible, next_visible),
+                    (Some(a), Some(b)) if is_cjk_ish(a) && is_cjk_ish(b)
+                );
+                if !joins_tight {
+                    out.push(' ');
+                    last_visible = Some(' ');
+                }
+            }
+            continue;
+        }
+
+        out.push(c);
+        if !c.is_whitespace() {
+            last_visible = Some(c);
+        }
+        i += 1;
+    }
+
+    out
+}
+
+/// 整行都是装饰符的「分隔线」吗（破折号、等号、星号、波浪线…）。
+///
+/// 至少 3 个字符才算，免得把正文里孤零零的一个「—」误删。
+fn is_decoration_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    let count = trimmed.chars().count();
+    if count < 3 {
+        return false;
+    }
+    trimmed.chars().all(|c| {
+        matches!(
+            c,
+            '—' | '–' | '-' | '－' | '_' | '＿' | '=' | '＝' | '~' | '～'
+                | '*' | '＊' | '﹏' | '·' | '・' | '┄' | '─' | '━' | '　'
+        )
+    })
+}
+
+/// 清理章节标题里的排版噪声。
+///
+/// 实测原始标题长这样：
+/// ```text
+/// 第五十回　 蘆雪庵爭聯即景詩　暖香塢雅制春燈謎
+/// 第五回—————————————————————- 游幻境指迷十二釵　飲仙醪曲演紅樓夢
+/// ```
+/// 中间那串破折号、全角空格、连续空格都是排版装饰，打出来毫无意义，
+/// 统一收成单个空格。
+fn clean_chapter_title(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut in_gap = false;
+
+    for c in raw.chars() {
+        let is_gap = c.is_whitespace()
+            || c == '—'   // 破折号
+            || c == '–'
+            || c == '-'   // 装饰用的连字符串
+            || c == '·'
+            || c == '・'
+            || c == '～'
+            || c == '~';
+
+        if is_gap {
+            if !in_gap {
+                out.push(' ');
+                in_gap = true;
+            }
+        } else {
+            out.push(c);
+            in_gap = false;
+        }
+    }
+
+    out.trim().to_string()
+}
+
+/// Decode HTML character references in a single left-to-right pass.///
 /// One pass matters. The previous implementation was a chain of `replace()`
 /// calls, which decodes twice: the source text `&amp;#39;` denotes the literal
 /// string "&#39;", but replacing `&amp;` first yields `&#39;`, and the next
@@ -828,18 +1080,18 @@ fn split_into_chapters(text: &str) -> Vec<ParsedChapter> {
     let lines: Vec<&str> = text.lines().collect();
     let mut chapter_starts: Vec<(usize, String)> = Vec::new();
 
-    // Detect chapter heading lines
+    // 在**保留行结构**的文本上找标题 —— 这是分章的前提。
     for (i, line) in lines.iter().enumerate() {
         let trimmed = line.trim();
         if is_chapter_heading(trimmed) {
-            chapter_starts.push((i, trimmed.to_string()));
+            chapter_starts.push((i, clean_chapter_title(trimmed)));
         }
     }
 
     if chapter_starts.is_empty() {
         return vec![ParsedChapter {
             title: "Full Text".to_string(),
-            content: text.trim().to_string(),
+            content: unwrap_wrapped_lines(text).trim().to_string(),
             level: 0,
         }];
     }
@@ -854,10 +1106,13 @@ fn split_into_chapters(text: &str) -> Vec<ParsedChapter> {
             lines.len()
         };
 
-        let content_lines: Vec<&str> = lines[start_line..end_line].to_vec();
-        let content = content_lines.join("\n").trim().to_string();
+        // 正文从标题行的**下一行**开始 —— 标题已经单独存成 title，
+        // 再塞进 content 里会让用户多打一遍。
+        let body_start = (start_line + 1).min(end_line);
+        let body = lines[body_start..end_line].join("\n");
+        let content = unwrap_wrapped_lines(&body).trim().to_string();
 
-        if !content.replace(title, "").trim().is_empty() {
+        if !content.is_empty() {
             chapters.push(ParsedChapter {
                 title: title.clone(),
                 content,
@@ -891,9 +1146,21 @@ fn is_chapter_heading(line: &str) -> bool {
         }
     }
 
-    // Chinese patterns: 第...章
-    if lower.starts_with("第") && lower.contains('章') {
+    // Chinese patterns: 第<数字>回/章/节/節/篇/部/卷
+    if is_chinese_chapter_heading(line) {
         return true;
+    }
+
+    // 无「第」的卷标题，如「卷三」「卷十二」。
+    // 只有短行才算，免得正文里以「卷」开头的句子被当成标题。
+    if let Some(rest) = line.strip_prefix('卷') {
+        let numerals: String = rest
+            .chars()
+            .take_while(|c| is_cjk_numeral(*c) || c.is_ascii_whitespace())
+            .collect();
+        if numerals.chars().any(is_cjk_numeral) && line.chars().count() <= 30 {
+            return true;
+        }
     }
 
     // Roman numeral chapter headings: "I.", "II.", "IV.", etc.
@@ -924,6 +1191,76 @@ fn is_chapter_heading(line: &str) -> bool {
     }
 
     false
+}
+
+/// 中文数字，含常见异体「〇」「○」「两」，以及 ASCII 数字。
+fn is_cjk_numeral(c: char) -> bool {
+    matches!(
+        c,
+        '零'
+            | '一'
+            | '二'
+            | '三'
+            | '四'
+            | '五'
+            | '六'
+            | '七'
+            | '八'
+            | '九'
+            | '十'
+            | '百'
+            | '千'
+            | '万'
+            | '两'
+            // 〇 U+3007 与 ○ U+25CB 是**两个不同的字**，都会有人用。
+            // 《西遊記》就写成「第一○回」…「第五○回」（U+25CB）——
+            // 只收 U+3007 的话，那 5 回会被整章漏掉。
+            | '〇'
+            | '○'
+            // 廿/卅：古籍里表示二十/三十
+            | '廿'
+            | '卅'
+    ) || c.is_ascii_digit()
+}
+
+/// 中文章节标题：`第<数字串><标记字>`，标记字为 回/章/节/節/篇/部/卷。
+///
+/// 结构上不会误判，靠两点：
+/// 1. `split_into_chapters` 只对 `line.trim()` 调用 `is_chapter_heading`，
+///    所以句中出现的「第三回」永远不可能在行首 → 不匹配。
+/// 2. 数字串之后必须**紧跟**标记字，所以「第三次」「第一件事」不匹配。
+///
+/// 这是中文古典小说的关键：「第五回 亂蟠桃大聖偷丹」这种回目，
+/// Project Gutenberg 的 EPUB 里既不在 TOC 中、也不是 `<h1>`-`<h4>`，
+/// 用传统的「只认 `第…章`」规则整本书会被当成 1 章。
+fn is_chinese_chapter_heading(line: &str) -> bool {
+    let mut chars = line.chars().peekable();
+
+    if chars.next() != Some('第') {
+        return false;
+    }
+
+    // 数字串，允许中间夹空白（「第 12 回」）
+    let mut digits = 0usize;
+    while let Some(&c) = chars.peek() {
+        if c.is_ascii_whitespace() || is_cjk_numeral(c) {
+            if !c.is_ascii_whitespace() {
+                digits += 1;
+            }
+            chars.next();
+        } else {
+            break;
+        }
+    }
+    if digits == 0 {
+        return false;
+    }
+
+    while matches!(chars.peek(), Some(&c) if c.is_ascii_whitespace()) {
+        chars.next();
+    }
+
+    matches!(chars.next(), Some('回' | '章' | '节' | '節' | '篇' | '部' | '卷'))
 }
 
 #[cfg(test)]
@@ -1114,4 +1451,286 @@ mod tests {
         }
         println!("checked {} PDF file(s) in {}", checked, dir);
     }
+
+    // ── 中文章节标题识别 ────────────────────────────────────────────────────
+
+    #[test]
+    fn recognizes_chinese_chapter_headings() {
+        // 古典小说的回目 —— 这是本次修复的核心
+        assert!(is_chapter_heading("第五回     亂蟠桃大聖偷丹　反天宮諸神捉怪"));
+        assert!(is_chapter_heading("第一百零八回 三国"));
+        assert!(is_chapter_heading("第一回 宴桃園豪傑三結義"));
+        // 现代章节标记
+        assert!(is_chapter_heading("第一章 起始"));
+        assert!(is_chapter_heading("第12节 概述"));
+        assert!(is_chapter_heading("第 9 章 空格分隔"));
+        assert!(is_chapter_heading("第一部 上"));
+        assert!(is_chapter_heading("第二卷"));
+        assert!(is_chapter_heading("第三篇 附录"));
+        // 裸「卷」
+        assert!(is_chapter_heading("卷三"));
+        assert!(is_chapter_heading("卷十二"));
+    }
+
+    #[test]
+    fn rejects_non_headings() {
+        // 行中出现的「第三回」：调用方传进来的是 trim 过的整行，
+        // 所以这种绝不可能是行首 → 不匹配。
+        assert!(!is_chapter_heading("他把第三回的信寄了出去"));
+        // 数字后面的字不是章节标记
+        assert!(!is_chapter_heading("第三次"));
+        assert!(!is_chapter_heading("第一件事"));
+        assert!(!is_chapter_heading("回龙观小区"));
+        assert!(!is_chapter_heading("前言"));
+        // 单独一个「卷」没有数字
+        assert!(!is_chapter_heading("卷"));
+        // 正文里以「卷」开头的长句不能被当成标题（长度兜底）
+        assert!(!is_chapter_heading(
+            "卷起了袖子就往屋里走，一边走一边喊着他娘的名字，声音大得整条巷子都听得见"
+        ));
+    }
+
+    #[test]
+    fn splits_a_plain_text_dump_where_newlines_are_the_only_structure() {
+        // 回归：《紅樓夢》的某些 chunk 只有几个 <p>、却有三四千个换行 ——
+        // 换行就是它唯一的结构。标题必须仍在行首被认出来。
+        let text = "寶玉听了笑道：「正是。」\n\
+                    黛玉道：「你說的是。」\n\
+                    第二十回　　 王熙鳳正言彈妒意　林黛玉俏語謔嬌音\n\
+                    ———————————————————————————\n\
+                    話說寶玉在林黛玉房中說「耗子精」，寶釵撞來。\n\
+                    三人正在房中互相譏刺取笑。\n\
+                    第二十一回　 賢襲人嬌嗔箴寶玉　俏平儿軟語救賈璉\n\
+                    話說史湘云跑了出來。";
+
+        let chapters = split_into_chapters(text);
+        assert_eq!(chapters.len(), 2, "两回都该切出来");
+        assert_eq!(chapters[0].title, "第二十回 王熙鳳正言彈妒意 林黛玉俏語謔嬌音");
+        assert_eq!(chapters[1].title, "第二十一回 賢襲人嬌嗔箴寶玉 俏平儿軟語救賈璉");
+        // 正文里的折行要还原，破折号装饰行不该出现在正文开头
+        assert!(chapters[0].content.starts_with("話說寶玉在林黛玉房中"));
+        assert!(!chapters[0].content.contains('\n'), "整段该还原成一行");
+    }
+
+    #[test]
+    fn cleans_decorative_chapter_titles() {
+        assert_eq!(
+            clean_chapter_title("第五回—————————————————————- 游幻境指迷十二釵　飲仙醪曲演紅樓夢"),
+            "第五回 游幻境指迷十二釵 飲仙醪曲演紅樓夢"
+        );
+        assert_eq!(
+            clean_chapter_title("第五十回　 蘆雪庵爭聯即景詩　暖香塢雅制春燈謎"),
+            "第五十回 蘆雪庵爭聯即景詩 暖香塢雅制春燈謎"
+        );
+        assert_eq!(
+            clean_chapter_title("第一回     靈根育孕源流出　心性修持大道生"),
+            "第一回 靈根育孕源流出 心性修持大道生"
+        );
+    }
+
+    #[test]
+    fn chapter_title_is_not_repeated_in_its_content() {
+        // 标题单独存了 title，正文里不该再让用户多打一遍
+        let text = "第一回 靈根育孕源流出\n詩曰：混沌未分天地亂。\n話說天地初分。";
+        let chapters = split_into_chapters(text);
+        assert_eq!(chapters.len(), 1);
+        assert_eq!(chapters[0].title, "第一回 靈根育孕源流出");
+        assert!(!chapters[0].content.contains("第一回"));
+        assert!(chapters[0].content.starts_with("詩曰"));
+    }
+
+    #[test]
+    fn splits_classical_novel_into_chapters() {
+        let text = "第五回 亂蟠桃大聖偷丹\n\n卻說那猴王自得了金箍棒，日日操演。\n\n第六回 觀音赴會問原因\n\n菩薩領了佛旨，徑上東土。\n\n第七回 八卦爐中逃大聖\n\n那大聖被推入爐中。";
+        let chapters = split_into_chapters(text);
+        assert_eq!(chapters.len(), 3);
+        assert!(chapters[0].title.starts_with("第五回"));
+        assert!(chapters[1].title.starts_with("第六回"));
+        assert!(chapters[2].title.starts_with("第七回"));
+    }
+
+    #[test]
+    fn does_not_split_on_mid_sentence_chapter_reference() {
+        // 「第三回」出现在句子中间 —— 整篇必须仍是一章。
+        let text = "他翻開書，看到第三回 的段落時愣了一下，這才想起當年的約定。\n\n後來他又讀了幾頁，便合上了書。";
+        let chapters = split_into_chapters(text);
+        assert_eq!(chapters.len(), 1);
+        assert_eq!(chapters[0].title, "Full Text");
+    }
+
+    #[test]
+    fn recognizes_the_white_circle_numeral() {
+        // 《西遊記》写成「第一○回」用的就是 U+25CB，不是 U+3007 〇
+        assert!(is_chapter_heading("第一○回 黃風嶺唐僧有難"));
+        assert!(is_chapter_heading("第五○回 情亂性從因愛欲"));
+        // U+3007 〇 也得认
+        assert!(is_chapter_heading("第一〇回 测试"));
+        // 廿 / 卅
+        assert!(is_chapter_heading("第廿回 测试"));
+    }
+
+    // ── Gutenberg 样板剔除 ──────────────────────────────────────────────────
+
+    #[test]
+    fn strips_plain_text_gutenberg_markers() {
+        let text = "\u{FEFF}The Project Gutenberg eBook of 西遊記\n\
+                    This eBook is for the use of anyone anywhere...\n\
+                    \n\
+                    *** START OF THE PROJECT GUTENBERG EBOOK 西遊記 ***\n\
+                    \n\
+                    第一回 靈根育孕源流出\n\
+                    詩曰：混沌未分天地亂。\n\
+                    \n\
+                    *** END OF THE PROJECT GUTENBERG EBOOK 西遊記 ***\n\
+                    \n\
+                    Updated editions will replace the previous one...\n";
+
+        let body = strip_gutenberg_markers(text);
+        assert!(body.starts_with("第一回"));
+        assert!(body.contains("詩曰"));
+        // 页眉页脚都不该留下
+        assert!(!body.contains("START OF THE PROJECT GUTENBERG"));
+        assert!(!body.contains("END OF THE PROJECT GUTENBERG"));
+        assert!(!body.contains("Updated editions"));
+    }
+
+    #[test]
+    fn leaves_books_without_markers_untouched() {
+        let plain = "第一章 起始\n\n这是一本普通的书。";
+        assert_eq!(strip_gutenberg_markers(plain), plain);
+    }
+
+    #[test]
+    fn spots_gutenberg_front_and_back_matter() {
+        // 书名页
+        assert!(is_gutenberg_boilerplate_text(
+            "The Project Gutenberg eBook of 西遊記 Title: 西遊記 Author: Cheng'en Wu \
+             Release date: December 22, 2007 [eBook #23962] Language: Chinese"
+        ));
+        // 许可声明
+        assert!(is_gutenberg_boilerplate_text(
+            "THE FULL PROJECT GUTENBERG™ LICENSE Please read this before you distribute \
+             or use this work. LIMITED WARRANTY, DISCLAIMER OF DAMAGES"
+        ));
+        // 普通正文不该被误伤
+        assert!(!is_gutenberg_boilerplate_text("第一回 靈根育孕源流出　心性修持大道生"));
+        assert!(!is_gutenberg_boilerplate_text("且說他三眾在路餐風宿水，帶月披星。"));
+    }
+
+    #[test]
+    fn keeps_the_novel_that_shares_a_file_with_the_front_matter() {
+        // 回归：曾经按 spine id 把 `pg-header` 整个文件跳过，结果《紅樓夢》
+        // 掉了一大半正文 —— 版权页和小说开头同处一个 chunk。
+        // 这个用例锁住「只裁掉标记之前的部分，标记之后全保留」。
+        let chunk = "The Project Gutenberg eBook of 紅樓夢\nTitle: 紅樓夢\n\
+                     Language: Chinese\n\
+                     *** START OF THE PROJECT GUTENBERG EBOOK 紅樓夢 ***\n\
+                     第一回 甄士隱夢幻識通靈\n\
+                     此開卷第一回也。作者自云：因曾歷過一番夢幻之後。";
+        let body = strip_gutenberg_markers(chunk);
+
+        assert!(body.starts_with("第一回"), "正文必须保留，实际 {:?}", &body[..body.len().min(40)]);
+        assert!(body.contains("此開卷第一回也"));
+        assert!(!body.contains("Project Gutenberg eBook of"));
+    }
+
+    // ── 繁 → 简 ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn converts_traditional_to_simplified() {
+        assert_eq!(to_simplified("西遊記"), "西游记");
+        assert_eq!(to_simplified("紅樓夢"), "红楼梦");
+        // 词级转换：不能把「頭髮」错转成「头發」
+        assert_eq!(to_simplified("頭髮"), "头发");
+        // 已是简体 / 纯拉丁 → 恒等
+        assert_eq!(to_simplified("西游记"), "西游记");
+        assert_eq!(to_simplified("Chapter One"), "Chapter One");
+    }
+
+    // ── 去掉 HTML 源码里的硬折行 ────────────────────────────────────────────
+
+    #[test]
+    fn unwraps_hard_wrapped_chinese_lines() {
+        // Gutenberg 的正文就是这个形状：一句按 ~35 字硬折成三行
+        let wrapped = "三藏道：「悟空，你看那日落\n西山藏火鏡，月升東海現冰輪。幸而道傍有一人家，我們且借宿一宵，明日再走\n。」八戒道：「說得是。」";
+        let unwrapped = unwrap_wrapped_lines(wrapped);
+        assert_eq!(
+            unwrapped,
+            "三藏道：「悟空，你看那日落西山藏火鏡，月升東海現冰輪。幸而道傍有一人家，我們且借宿一宵，明日再走。」八戒道：「說得是。」"
+        );
+        // 关键：换行落在句中标点前后也不能插进空格
+        assert!(!unwrapped.contains(' '), "中文断行处不该出现空格: {:?}", unwrapped);
+    }
+
+    #[test]
+    fn unwraps_latin_lines_to_a_space() {
+        // 西文断行处本来就有空格，应该还原成一个空格而不是粘在一起
+        assert_eq!(
+            unwrap_wrapped_lines("The quick brown fox\njumps over the lazy dog"),
+            "The quick brown fox jumps over the lazy dog"
+        );
+    }
+
+    #[test]
+    fn keeps_blank_lines_as_paragraph_breaks() {
+        // 连续两个换行是**真正的**段落分隔，必须保留 ——
+        // 否则整章会变成一个巨大的单段。
+        let text = "第一段的内容。\n\n第二段的内容。\n\n\n第三段的内容。";
+        let unwrapped = unwrap_wrapped_lines(text);
+        assert_eq!(unwrapped, "第一段的内容。\n第二段的内容。\n第三段的内容。");
+    }
+
+    #[test]
+    fn keeps_real_line_breaks_from_br_and_p() {
+        // <br/> 与 <p> 产生的换行是真换行，不能被抹掉（Gutenberg 的韵文靠这个分行）
+        let cleaned = clean_html("<p>法本從心生，還是從心滅。<br/>生滅盡由誰？</p><p>第二回 悟徹菩提</p>", None);
+        assert_eq!(
+            cleaned,
+            "法本從心生，還是從心滅。\n生滅盡由誰？\n\n第二回 悟徹菩提"
+        );
+    }
+
+    /// 对真实 EPUB 跑一遍分章，用环境变量门控以免默认测试碰磁盘/网络。
+    /// 主要用于验证 Project Gutenberg 的中文古典小说能切出回目。
+    ///
+    /// ```text
+    /// DAZIJI_EPUB_DIR='C:\path\to\epubs' cargo test --no-default-features --lib -- --nocapture real_epub_import
+    /// ```
+    #[test]
+    fn real_epub_import() {
+        let Ok(dir) = std::env::var("DAZIJI_EPUB_DIR") else {
+            println!("DAZIJI_EPUB_DIR not set — skipping");
+            return;
+        };
+        let mut checked = 0;
+        for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase())
+                != Some("epub".to_string())
+            {
+                continue;
+            }
+            let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+            match parse_epub_internal(&path.to_string_lossy(), None) {
+                Ok((title, author, chapters, _cover)) => {
+                    let total: usize = chapters.iter().map(|c| c.content.chars().count()).sum();
+                    println!(
+                        "OK   {} | title={:?} author={:?} chapters={} chars={} first={:?}",
+                        name,
+                        title,
+                        author,
+                        chapters.len(),
+                        total,
+                        chapters.first().map(|c| c.title.clone()).unwrap_or_default(),
+                    );
+                }
+                Err(message) => println!("ERR  {} | {}", name, message),
+            }
+            checked += 1;
+        }
+        println!("checked {} EPUB file(s) in {}", checked, dir);
+    }
 }
+
+
+

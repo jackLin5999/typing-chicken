@@ -22,6 +22,8 @@ pub struct BookEntry {
     pub created_at: String,
     pub incorrect_positions: String,
     pub cover_image: Option<String>,
+    /// Gutendex id when this book came from the 书库; `None` for local imports.
+    pub source_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -105,6 +107,31 @@ pub async fn delete_book(
         std::fs::remove_dir_all(&book_dir).map_err(|e| e.to_string())?;
     }
     db.delete_book(&book_id).map_err(|e| e.to_string())
+}
+
+/// Read the persisted user settings (key → JSON-encoded value).
+#[tauri::command]
+pub async fn get_settings(
+    state: State<'_, AppState>,
+) -> Result<std::collections::HashMap<String, String>, String> {
+    let db = lock_db(&state.db);
+    Ok(db
+        .get_settings()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .collect())
+}
+
+/// Persist one setting. Values are JSON-encoded on the frontend so this side
+/// stays agnostic about their types.
+#[tauri::command]
+pub async fn set_setting(
+    state: State<'_, AppState>,
+    key: String,
+    value: String,
+) -> Result<(), String> {
+    let db = lock_db(&state.db);
+    db.set_setting(&key, &value).map_err(|e| e.to_string())
 }
 
 /// Return a base64 data URL for an extracted image file.

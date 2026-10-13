@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { Minus, Square, Copy, X } from "lucide-react";
+import { useLocation, useNavigate } from "react-router-dom";
+import { Minus, Square, Copy, X, BookMarked, Library } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 /**
@@ -10,6 +11,14 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 export function Titlebar() {
   const [isMaximized, setIsMaximized] = useState(false);
   const appWindow = getCurrentWindow();
+  const navigate = useNavigate();
+  const { pathname } = useLocation();
+
+  /** Left-hand page nav: 书架 (/) and 书库 (/browse). */
+  const navItems = [
+    { to: "/", label: "书架", Icon: Library },
+    { to: "/browse", label: "书库", Icon: BookMarked },
+  ];
 
   const handleMinimize = async () => {
     try {
@@ -65,6 +74,36 @@ export function Titlebar() {
         <span className="text-[13px] font-bold tracking-[0.05em] text-rose-500 select-none">
           打字雞
         </span>
+
+        {/* Page nav — onMouseDown, not onClick: the drag region eats clicks
+            in frameless windows. stopPropagation keeps the window still. */}
+        <nav className="flex items-center gap-1 ml-3 h-full">
+          {navItems.map(({ to, label, Icon }) => {
+            const isActive = pathname === to;
+            return (
+              <button
+                key={to}
+                onMouseDown={(e) => {
+                  e.stopPropagation();
+                  navigate(to);
+                }}
+                className={`
+                  flex items-center gap-1.5 h-7 px-2.5 rounded-md
+                  text-xs font-medium transition-colors cursor-pointer
+                  ${isActive
+                    ? "text-accent bg-accent/10"
+                    : "text-muted hover:text-ink hover:bg-surface-hover"}
+                `}
+                style={{ pointerEvents: "auto", cursor: "pointer" }}
+                aria-label={label}
+                aria-current={isActive ? "page" : undefined}
+              >
+                <Icon size={13} />
+                {label}
+              </button>
+            );
+          })}
+        </nav>
       </div>
 
       {/* Right: Window controls — use onMouseDown to beat the drag region */}

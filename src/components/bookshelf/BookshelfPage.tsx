@@ -2,12 +2,13 @@ import { useEffect, useState, useCallback, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Plus, Library, Upload, AlertTriangle, X } from "lucide-react";
+import { Plus, Library, Upload, AlertTriangle, CheckCircle2, X } from "lucide-react";
 import { useBookStore } from "@/store";
-import { useBookImport } from "@/hooks/useBookImport";
+import { useBookImport, fileNameOf } from "@/hooks/useBookImport";
 import { BookCard } from "./BookCard";
 import { ImportZone } from "./ImportZone";
 import type { Book } from "@/types/book";
+import type { ImportResult } from "@/types/catalog";
 
 const SUPPORTED_EXTENSIONS = ["epub", "txt", "pdf"];
 
@@ -17,14 +18,25 @@ function isSupportedFile(path: string): boolean {
 }
 
 /**
+ * Best-effort "is this a folder?" for the drag-over highlight only.
+ * Rust's `resolve_import_paths` is the source of truth for what actually gets
+ * imported — this just decides whether to light up the drop overlay.
+ */
+function looksLikeFolder(path: string): boolean {
+  const base = fileNameOf(path);
+  return !base.includes(".");
+}
+
+/**
  * The main landing page — a "bookshelf" grid of imported books.
  * Drag-and-drop file import via Tauri native events.
  */
 export function BookshelfPage() {
   const navigate = useNavigate();
   const { books, setBooks, importError, setImportError } = useBookStore();
-  const { importBook, importFile } = useBookImport();
+  const { importBooks, importFiles } = useBookImport();
   const [isDragOver, setIsDragOver] = useState(false);
+  const [summary, setSummary] = useState<ImportResult[] | null>(null);
   const processedPaths = useRef<Set<string>>(new Set());
 
   // Load books from the local database on mount
@@ -42,20 +54,31 @@ export function BookshelfPage() {
       .onDragDropEvent((event) => {
         const { type } = event.payload;
         if (type === "enter") {
-          if ("paths" in event.payload && event.payload.paths.some(isSupportedFile)) {
+          if (
+            "paths" in event.payload &&
+            event.payload.paths.some((p) => isSupportedFile(p) || looksLikeFolder(p))
+          ) {
             setIsDragOver(true);
           }
         } else if (type === "drop") {
           setIsDragOver(false);
-          for (const path of event.payload.paths) {
-            if (!isSupportedFile(path)) continue;
-            // Prevent duplicate imports of the same file in the same drop
-            if (processedPaths.current.has(path)) continue;
-            processedPaths.current.add(path);
-            importFile(path);
-          }
-          // Clear processed paths after a short delay
-          setTimeout(() => processedPaths.current.clear(), 2000);
+          const dropped = event.payload.paths;
+
+          // Dropped folders are expanded in Rust — the fs plugin would reject
+          // paths outside its granted scope, so `std::fs` does the walking.
+          invoke<string[]>("resolve_import_paths", { paths: dropped })
+            .then((files) => {
+              const fresh = files.filter((p) => !processedPaths.current.has(p));
+              fresh.forEach((p) => processedPaths.current.add(p));
+              if (fresh.length === 0) return;
+              // Batch: collect every outcome so one bad file can't hide the rest.
+              return importFiles(fresh).then((results) => {
+                setSummary(results.length > 1 ? results : null);
+              });
+            })
+            .catch(console.error);
+
+          setTimeout(() => processedPaths.current.clear(), 3000);
         } else if (type === "leave") {
           setIsDragOver(false);
         }
@@ -64,7 +87,7 @@ export function BookshelfPage() {
       .catch(console.error);
 
     return () => { unlisten?.(); };
-  }, [importFile]);
+  }, [importFiles]);
 
   const handleBookClick = useCallback(
     (book: Book) => navigate(`/read/${book.id}`),
@@ -82,6 +105,12 @@ export function BookshelfPage() {
     },
     [books, setBooks],
   );
+
+  /** Import via the native dialog (multi-select), then summarise the batch. */
+  const handleImportClick = useCallback(async () => {
+    const results = await importBooks();
+    setSummary(results.length > 1 ? results : null);
+  }, [importBooks]);
 
   const overallPct =
     books.length > 0
@@ -116,7 +145,7 @@ export function BookshelfPage() {
           <div className="w-20 h-20 rounded-full bg-accent/20 flex items-center justify-center">
             <Upload size={36} className="text-accent" />
           </div>
-          <p className="text-lg font-semibold text-accent">Drop your file to import</p>
+          <p className="text-lg font-semibold text-accent">Drop files or a folder to import</p>
           <p className="text-sm text-muted">EPUB</p>
         </div>
       )}
@@ -137,7 +166,7 @@ export function BookshelfPage() {
 
           {books.length > 0 && (
             <button
-              onClick={importBook}
+              onClick={handleImportClick}
               className="flex items-center gap-2 px-4 py-2 rounded-lg
                 bg-accent text-white text-sm font-medium
                 hover:bg-blue-600 active:bg-blue-700 transition-colors shadow-sm"
@@ -163,6 +192,49 @@ export function BookshelfPage() {
           </div>
         )}
 
+        {/* Batch import summary — only for multi-file imports; a lone failure
+            uses the single-error banner above instead. */}
+        {summary && (() => {
+          const ok = summary.filter((r) => r.book).length;
+          const failed = summary.filter((r) => r.error);
+          return (
+            <div className="mb-8 flex items-start gap-3 rounded-lg border border-gray-200/60 dark:border-gray-700/40 bg-surface px-4 py-3">
+              {failed.length === 0 ? (
+                <CheckCircle2 size={18} className="mt-0.5 shrink-0 text-accent-correct" />
+              ) : (
+                <AlertTriangle size={18} className="mt-0.5 shrink-0 text-error" />
+              )}
+              <div className="flex-1 text-sm text-ink leading-relaxed">
+                <p>
+                  已导入 {ok} 本
+                  {failed.length > 0 ? `，${failed.length} 本失败` : ""}
+                </p>
+                {failed.length > 0 && (
+                  <details className="mt-1.5">
+                    <summary className="cursor-pointer text-xs text-muted hover:text-ink transition-colors">
+                      查看失败原因
+                    </summary>
+                    <ul className="mt-1.5 space-y-1">
+                      {failed.map((r) => (
+                        <li key={r.path} className="text-xs text-muted">
+                          <span className="text-ink">{fileNameOf(r.path)}</span> — {r.error}
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
+                )}
+              </div>
+              <button
+                onClick={() => setSummary(null)}
+                aria-label="Dismiss"
+                className="shrink-0 rounded p-0.5 text-muted hover:text-ink transition-colors cursor-pointer"
+              >
+                <X size={16} />
+              </button>
+            </div>
+          );
+        })()}
+
         {/* Empty state */}
         {books.length === 0 && (
           <div className="flex flex-col items-center justify-center py-20 gap-6">
@@ -180,7 +252,7 @@ export function BookshelfPage() {
 
             {/* Mini import card */}
             <button
-              onClick={importBook}
+              onClick={handleImportClick}
               className="group flex flex-col items-center justify-center
                 w-44 h-64 rounded-lg border-2 border-dashed
                 border-gray-200 dark:border-gray-700 hover:border-accent/40
