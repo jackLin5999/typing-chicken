@@ -1,6 +1,6 @@
 [package]
 name = "da-zi-ji"
-version = "0.5.3"
+version = "0.7.4"
 description = "打字雞 — 桌面打字练习软件"
 authors = ["jackLin5999"]
 license = "MIT"
