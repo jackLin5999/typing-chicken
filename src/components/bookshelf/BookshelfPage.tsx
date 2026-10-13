@@ -117,7 +117,7 @@ export function BookshelfPage() {
             <Upload size={36} className="text-accent" />
           </div>
           <p className="text-lg font-semibold text-accent">Drop your file to import</p>
-          <p className="text-sm text-muted">EPUB, PDF, or TXT</p>
+          <p className="text-sm text-muted">EPUB</p>
         </div>
       )}
 

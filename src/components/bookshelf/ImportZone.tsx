@@ -56,7 +56,7 @@ export function ImportZone() {
           Import your first book
         </p>
         <p className="text-xs text-muted">
-          EPUB, PDF, or TXT
+          EPUB
         </p>
       </div>
     </button>
