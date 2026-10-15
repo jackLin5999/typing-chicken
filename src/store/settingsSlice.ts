@@ -18,6 +18,7 @@ const PERSISTED_KEYS = [
   "showPinyin",
   "skipPunctuation",
   "convertToSimplified",
+  "showKeyboardHint",
 ] as const satisfies readonly (keyof UserSettings)[];
 
 interface SettingsState extends UserSettings {
@@ -29,6 +30,7 @@ interface SettingsState extends UserSettings {
   setShowLiveStats: (show: boolean) => void;
   setSkipPunctuation: (skip: boolean) => void;
   setConvertToSimplified: (convert: boolean) => void;
+  setShowKeyboardHint: (show: boolean) => void;
   loadFromDisk: (settings: Partial<UserSettings>) => void;
 }
 
@@ -43,6 +45,8 @@ export const useSettingsStore = create<SettingsState>((set) => ({
   skipPunctuation: false,
   // 书库里的中文书几乎全是繁体，默认转成简体 —— 大陆用户拿来练打字才有意义
   convertToSimplified: true,
+  // 阅读时默认显示键盘指法提示：这是唯一教「用哪根手指」的地方，藏起来没人发现
+  showKeyboardHint: true,
 
   // 每个 setter 都顺手写回数据库。存不上不影响使用（只记日志），
   // 所以不用 await，也不回滚内存里的值。
@@ -77,6 +81,10 @@ export const useSettingsStore = create<SettingsState>((set) => ({
   setConvertToSimplified: (convertToSimplified) => {
     set({ convertToSimplified });
     persistSetting("convertToSimplified", convertToSimplified);
+  },
+  setShowKeyboardHint: (showKeyboardHint) => {
+    set({ showKeyboardHint });
+    persistSetting("showKeyboardHint", showKeyboardHint);
   },
 
   // 直接 set，不走上面的 setter —— 否则刚从库里读出来又会立刻写回去

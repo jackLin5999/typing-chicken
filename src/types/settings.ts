@@ -22,4 +22,10 @@ export interface UserSettings {
    * defaults to on. Local file imports are never converted.
    */
   convertToSimplified: boolean;
+  /**
+   * 阅读练习时在下方显示键盘指法提示。
+   * 默认开 —— 它是这个软件唯一教「用哪根手指」的地方，藏起来就没人发现了；
+   * 会盲打的人关一次，设置会记住。
+   */
+  showKeyboardHint: boolean;
 }
