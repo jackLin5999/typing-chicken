@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback } from "react";
+import { useEffect, useRef, useCallback, useState } from "react";
 import type { MutableRefObject } from "react";
 import { useSettingsStore, useTypingStore, currentSkipPunctuation } from "@/store";
 import { isAutoSkipped, isPunctuation, isWhitespace } from "@/lib/utils";
@@ -185,8 +185,15 @@ export function useTypingEngine(options: TypingEngineOptions = {}) {
     const textarea = inputRef.current;
     if (!textarea) return;
 
-    // Don't process while IME composition is still in progress
-    if (isComposingRef.current) return;
+    // Don't process while IME composition is still in progress.
+    //
+    // 但**顺手把草稿读一次**：有的输入法组合期间不填 compositionupdate 的
+    // data，只靠那条线高亮会冻在第一个字母上，看着就是坏的。这里不处理字符，
+    // 只是让提示那侧多一次拿到草稿的机会。
+    if (isComposingRef.current) {
+      setComposing(textarea.value);
+      return;
+    }
 
     const value = textarea.value;
     if (!value) return;
@@ -233,10 +240,43 @@ export function useTypingEngine(options: TypingEngineOptions = {}) {
 
   const handleCompositionStart = useCallback(() => {
     isComposingRef.current = true;
+    setComposing("");
   }, []);
+
+  /**
+   * 输入法正在组合的那串字母（「zhong」这样）。
+   *
+   * 引擎本身不需要它 —— 提交之前一个字符都不处理。但**指法提示需要**：
+   * 打中文时用户敲的是拼音字母，键位要靠它才知道该亮哪一个。
+   * 这是 UI 状态，不是输入状态，所以放在 state 里而不是 ref 里。
+   */
+  const [composing, setComposing] = useState("");
+
+  /**
+   * 取组合草稿 —— **三个渠道，哪个有就用哪个**。
+   *
+   * 1. 隐藏 textarea 的 `value`：组合期间它就装着拼音草稿。最靠得住，优先。
+   * 2. `compositionupdate` 的 `e.data`：标准来源，但有的输入法不填或给不全。
+   * 3. `input` 事件（见 `handleInput` 的提前返回处）：兜底再读一次 value。
+   *
+   * 只用其中一个的话，那一路断了高亮就冻在第一个字母上 —— 看着像坏了，
+   * 其实只是没读到。多一条线，坏一条不影响。
+   */
+  const setComposingFromDraft = useCallback((fallback?: string) => {
+    const draft = inputRef.current?.value ?? "";
+    setComposing(draft || fallback || "");
+  }, []);
+
+  const handleCompositionUpdate = useCallback(
+    (e: React.CompositionEvent<HTMLTextAreaElement>) => {
+      setComposingFromDraft(e.data);
+    },
+    [setComposingFromDraft],
+  );
 
   const handleCompositionEnd = useCallback(() => {
     isComposingRef.current = false;
+    setComposing("");
     // After composition ends, the browser fires an `input` event next.
     // We process in a microtask to ensure the textarea value is updated first.
     queueMicrotask(() => handleInput());
@@ -353,5 +393,16 @@ export function useTypingEngine(options: TypingEngineOptions = {}) {
   // The ReaderPage shows a completion summary; session stays active until the
   // user presses Escape or manually exits.
 
-  return { inputRef: setInputRef, handleInput, handleCompositionStart, handleCompositionEnd, handleBlur, handleKeydown, isComplete };
+  return {
+    inputRef: setInputRef,
+    handleInput,
+    handleCompositionStart,
+    handleCompositionUpdate,
+    handleCompositionEnd,
+    handleBlur,
+    handleKeydown,
+    isComplete,
+    /** 输入法正在组合的拼音串，空串＝没在组合。指法提示用它定位该敲的字母。 */
+    composing,
+  };
 }

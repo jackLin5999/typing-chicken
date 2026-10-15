@@ -29,6 +29,14 @@ interface KeyboardHintProps {
    * 课程里开 —— 那里本来就是在学指法。
    */
   showHands?: boolean;
+  /**
+   * 顶掉键盘下方那行说明文字。
+   *
+   * 中文输入用：该敲的字母不一定存在 —— 拼音打完了是「去选字」，
+   * 多音字对不上是「这个字读什么」，都不是「用哪根手指敲哪个键」。
+   * 这时候没有键可指，但**必须说清楚在等什么**，否则键盘就是一片死寂。
+   */
+  hintOverride?: string;
   className?: string;
 }
 
@@ -62,6 +70,7 @@ export function KeyboardHint({
   nextChar,
   taught,
   showHands = false,
+  hintOverride,
   className,
 }: KeyboardHintProps) {
   const stroke = useMemo(() => strokeFor(nextChar), [nextChar]);
@@ -220,7 +229,7 @@ export function KeyboardHint({
         )}
       </svg>
 
-      <p className="mt-1.5 text-center text-xs text-muted">{hintText}</p>
+      <p className="mt-1.5 text-center text-xs text-muted">{hintOverride ?? hintText}</p>
     </div>
   );
 }

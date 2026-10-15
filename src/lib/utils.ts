@@ -48,6 +48,67 @@ export function isAutoSkipped(
   return isWhitespace(ch) || (skipPunctuation && isPunctuation(ch));
 }
 
+/** 汉字（含扩展 A 区）。判断「要不要走拼音」就看它。 */
+export function isCjkChar(ch: string | undefined): boolean {
+  return ch !== undefined && /[㐀-鿿]/.test(ch);
+}
+
+/** 拼音转成「键盘上敲得出来的样子」。`ü` 一律按 `v` 算 —— 输入法里就是敲 v（女 = nv）。 */
+const keyablePinyin = (s: string) =>
+  s.toLowerCase().replace(/ü/g, "v").replace(/[^a-z]/g, "");
+
+export type PinyinKeyHint =
+  /** 敲这个字母。 */
+  | { kind: "key"; letter: string }
+  /** 拼音打完了，接下来是选字（空格或数字），没有字母可敲。 */
+  | { kind: "done" }
+  /** 组合串和拼音对不上，或者根本拿不到拼音 —— 不猜。 */
+  | { kind: "none" };
+
+/**
+ * 中文输入时，键盘上该标出来的那个字母。
+ *
+ * 打中文敲的是拼音字母，而输入法把字母扣在自己手里 —— 提交之前
+ * `targetText[cursorIndex]` 一直是那个汉字，键位提示于是什么都不亮。
+ * 这个函数把它翻译回去。
+ *
+ * 关键是**组合串会横跨好几个字**：「zhongguo」＝中国，「zhongg」是打到一半。
+ * 所以不能只盯着光标下那一个字，要从光标起往前走，一个字一个字地把组合串
+ * 消耗掉，走到哪儿、下一个字母就是谁。
+ *
+ * 返回 `done` 而不是退回第一个字母：拼音打满了就没有「下一个字母」，
+ * 这时候指的是选字键。跳回首字母是在骗人 —— 那个字母早就敲过了。
+ *
+ * 对不上（多音字：行 xíng/háng，你打的可能是另一个读音）返回 `none`，
+ * 宁可什么都不亮，也不指一个错的键。
+ */
+export function pinyinNextKey(
+  composed: string,
+  fromIndex: number,
+  pinyinAt: (index: number) => string,
+  maxChars = 8,
+): PinyinKeyHint {
+  let rest = keyablePinyin(composed);
+
+  for (let i = 0; i < maxChars; i++) {
+    const py = keyablePinyin(pinyinAt(fromIndex + i));
+    if (!py) continue; // 空格、标点：没有拼音，跳过
+
+    if (py.startsWith(rest)) {
+      // 组合串停在这个字里（包括「还没开始打」的 rest 为空）
+      const letter = py[rest.length];
+      return letter ? { kind: "key", letter } : { kind: "done" };
+    }
+    if (rest.startsWith(py)) {
+      // 这个字已经打完了，接着消耗下一个字
+      rest = rest.slice(py.length);
+      continue;
+    }
+    return { kind: "none" };
+  }
+  return { kind: "none" };
+}
+
 /**
  * Segment text into an array of characters for rendering, preserving newlines.
  */

@@ -179,6 +179,7 @@ export function LessonRunner() {
           inputRef={typingEngine.inputRef}
           onInput={typingEngine.handleInput}
           onCompositionStart={typingEngine.handleCompositionStart}
+          onCompositionUpdate={typingEngine.handleCompositionUpdate}
           onCompositionEnd={typingEngine.handleCompositionEnd}
           onBlur={typingEngine.handleBlur}
           onKeyDown={typingEngine.handleKeydown}

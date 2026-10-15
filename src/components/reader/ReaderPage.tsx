@@ -1,7 +1,8 @@
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { useBookStore, useSettingsStore, useTypingStore } from "@/store";
+import { getRangePinyin, isCjkChar, pinyinNextKey } from "@/lib/utils";
 import { KeyboardHint } from "@/components/keyboard/KeyboardHint";
 import { useTypingEngine } from "@/hooks/useTypingEngine";
 import { useAutoSave } from "@/hooks/useAutoSave";
@@ -14,6 +15,13 @@ import { CompletionSummary } from "./CompletionSummary";
 import { LiveStats } from "@/components/stats/LiveStats";
 import type { Book, Chapter } from "@/types/book";
 import type { TypingStats } from "@/types/typing";
+
+/**
+ * 一次备多远的拼音。输入法一提交就是好几个字（「zhongguo」→「中国」），
+ * 加上打字快时一屏之内连过十几个字，窗口太小就还是会追不上。
+ * 24 个字一次查完，代价是一次 pinyin-pro 调用。
+ */
+const PINYIN_AHEAD = 24;
 
 /**
  * The immersive reading/typing view for a selected book.
@@ -194,6 +202,99 @@ export function ReaderPage() {
   /** 键盘提示此刻是否真画在屏幕上 —— 它在流内占位，让位空间要跟着它开关。 */
   const showKeyboard = isActive && showKeyboardHint;
 
+  /**
+   * 提前备好的一窗拼音。
+   *
+   * 拼音是异步查出来的（pinyin-pro 动态 import），而键位**必须在渲染的那一
+   * 瞬间**就知道该亮哪个字母。原来每个字查一次、查回来还要核对「下标正好等于
+   * 当前光标」—— 按得快的时候每次光标前移都还在等上一次的 Promise，这个条件
+   * 频繁落空，键盘就整段空白，停下来才追上。
+   *
+   * 所以改成**提前备一窗**：光标往后 PINYIN_AHEAD 个字的拼音先查好放进这里，
+   * 渲染时同步取，不等任何人。打字再快，字也是先到窗口里、后到光标下。
+   *
+   * **连文本一起存**：换章时不能拿上一章的拼音去亮键。渲染发生在 effect 之前，
+   * 光靠效果里清除躲不开「第一帧读到旧数据」，所以读的时候比对文本。
+   */
+  const pinyinWindow = useRef<{ text: string; map: Map<number, string> }>({
+    text: "",
+    map: new Map(),
+  });
+  const [pinyinVersion, refill] = useState(0);
+  const hasCjk = useMemo(() => /[㐀-鿿]/.test(targetText), [targetText]);
+
+  useEffect(() => {
+    if (!hasCjk) return;
+    if (pinyinWindow.current.text !== targetText) {
+      pinyinWindow.current = { text: targetText, map: new Map() };
+    }
+    let cancelled = false;
+    const end = Math.min(targetText.length, cursorIndex + PINYIN_AHEAD);
+    getRangePinyin(targetText, cursorIndex, end).then((fetched) => {
+      if (cancelled) return;
+      const win = pinyinWindow.current;
+      if (win.text !== targetText) return; // 章已经换了，这批数据不要了
+      const missedCurrent = !win.map.has(cursorIndex);
+      fetched.forEach((value, index) => win.map.set(index, value));
+      // 当前这个字正好是这一批才查出来的，得再渲染一次才看得见
+      if (missedCurrent && win.map.has(cursorIndex)) refill((n) => n + 1);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [targetText, cursorIndex, hasCjk]);
+
+  const pinyinAt = useCallback(
+    (index: number) => {
+      const win = pinyinWindow.current;
+      return win.text === targetText ? (win.map.get(index) ?? "") : "";
+    },
+    [targetText, pinyinVersion],
+  );
+  const nextPinyin = pinyinAt(cursorIndex);
+
+  /** 该敲哪个字母 —— 拼音已经打掉的那一截由输入法的组合串说了算。 */
+  const pinyinHint = useMemo(
+    () =>
+      isCjkChar(nextChar)
+        ? pinyinNextKey(typingEngine.composing, cursorIndex, pinyinAt)
+        : null,
+    [nextChar, cursorIndex, typingEngine.composing, pinyinAt],
+  );
+
+  /**
+   * 键盘上真正要标出来的那个键，以及下方那行说明。
+   *
+   * 打中文时敲的是**拼音字母**，而光标一直停在汉字上 —— 直接把汉字交给
+   * 键位提示，`strokeFor` 认不出来，整个键盘一片空白，这个功能等于没有。
+   * 所以翻译一层：汉字 → 拼音 → 当前该敲的那个字母。
+   *
+   * 没有字母可敲时**必须说明白在等什么**，否则键盘就是一片死寂：
+   * 「拼音打完了」是提示去选字，不是故障。
+   */
+  const { keyboardChar, keyboardNote } = useMemo(() => {
+    if (!isCjkChar(nextChar)) return { keyboardChar: nextChar, keyboardNote: undefined };
+
+    switch (pinyinHint?.kind) {
+      case "key":
+        return { keyboardChar: pinyinHint.letter, keyboardNote: undefined };
+      case "done":
+        // 拼音打满的那一刻没有「下一个字母」可言，但两条路都还开着：
+        // 上屏这个字，或者接着打下一个字（输入法会把整词一起给出来）。
+        return {
+          keyboardChar: undefined,
+          keyboardNote: "拼音打完了 —— 按空格选字，或接着往下打",
+        };
+      default:
+        // 还没查出来、生僻字、或者打的是另一个读音（多音字）：不指键，但把
+        // 这个字读什么写出来，用户自己能对一眼
+        return {
+          keyboardChar: undefined,
+          keyboardNote: nextPinyin ? `这个字读「${nextPinyin}」` : undefined,
+        };
+    }
+  }, [nextChar, nextPinyin, pinyinHint]);
+
   const [finalStats, setFinalStats] = useState<TypingStats | null>(null);
 
   useEffect(() => {
@@ -333,6 +434,7 @@ export function ReaderPage() {
           inputRef={typingEngine.inputRef}
           onInput={typingEngine.handleInput}
           onCompositionStart={typingEngine.handleCompositionStart}
+          onCompositionUpdate={typingEngine.handleCompositionUpdate}
           onCompositionEnd={typingEngine.handleCompositionEnd}
           onBlur={typingEngine.handleBlur}
           onKeyDown={typingEngine.handleKeydown}
@@ -345,7 +447,7 @@ export function ReaderPage() {
         <div
           className={`shrink-0 max-w-2xl w-full mx-auto px-4 ${CONTROLS_CLEARANCE}`}
         >
-          <KeyboardHint nextChar={nextChar} />
+          <KeyboardHint nextChar={keyboardChar} hintOverride={keyboardNote} />
         </div>
       )}
 

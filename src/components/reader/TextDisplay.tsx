@@ -21,6 +21,7 @@ interface TextDisplayProps {
   inputRef: React.RefCallback<HTMLTextAreaElement>;
   onInput: () => void;
   onCompositionStart: () => void;
+  onCompositionUpdate: (e: React.CompositionEvent<HTMLTextAreaElement>) => void;
   onCompositionEnd: () => void;
   onBlur: () => void;
   onKeyDown: (e: React.KeyboardEvent<HTMLTextAreaElement>) => void;
@@ -210,6 +211,7 @@ export function TextDisplay({
   inputRef,
   onInput,
   onCompositionStart,
+  onCompositionUpdate,
   onCompositionEnd,
   onBlur,
   onKeyDown,
@@ -386,6 +388,7 @@ export function TextDisplay({
         ref={handleTextareaRef}
         onInput={onInput}
         onCompositionStart={onCompositionStart}
+        onCompositionUpdate={onCompositionUpdate}
         onCompositionEnd={onCompositionEnd}
         onBlur={onBlur}
         onKeyDown={onKeyDown}
