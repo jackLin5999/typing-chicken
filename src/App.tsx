@@ -3,6 +3,9 @@ import { HashRouter, Routes, Route } from "react-router-dom";
 import { Layout } from "@/components/layout/Layout";
 import { BookshelfPage } from "@/components/bookshelf/BookshelfPage";
 import { BrowsePage } from "@/components/browse/BrowsePage";
+import { StatsPage } from "@/components/stats/StatsPage";
+import { LessonsPage } from "@/components/lessons/LessonsPage";
+import { LessonRunner } from "@/components/lessons/LessonRunner";
 import { ReaderPage } from "@/components/reader/ReaderPage";
 import { useTheme } from "@/hooks/useTheme";
 import { loadPersistedSettings } from "@/store/settingsSlice";
@@ -26,6 +29,9 @@ export function App() {
         <Route element={<Layout />}>
           <Route path="/" element={<BookshelfPage />} />
           <Route path="/browse" element={<BrowsePage />} />
+          <Route path="/stats" element={<StatsPage />} />
+          <Route path="/lessons" element={<LessonsPage />} />
+          <Route path="/lessons/:lessonId" element={<LessonRunner />} />
           <Route path="/read/:bookId" element={<ReaderPage />} />
         </Route>
       </Routes>

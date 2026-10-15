@@ -68,11 +68,12 @@ export function ChapterPanel({
         {/* Header */}
         <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100 dark:border-gray-800">
           <h2 className="text-sm font-semibold text-ink">
-            Table of Contents
+            章节目录
           </h2>
           <button
             onClick={onClose}
-            className="p-1 rounded-md hover:bg-surface-hover transition-colors"
+            aria-label="关闭目录"
+            className="p-1 rounded-md hover:bg-surface-hover transition-colors cursor-pointer"
           >
             <X size={16} className="text-muted" />
           </button>
@@ -82,13 +83,15 @@ export function ChapterPanel({
         <div className="flex-1 overflow-y-auto py-2">
           {chapters.length === 0 && (
             <p className="text-xs text-muted text-center py-8">
-              No chapters found
+              没有找到章节
             </p>
           )}
           {chapters.map((ch) => {
             const isActive = ch.id === currentChapterId;
-            const wordCount = ch.content?.split(/\s+/).filter(Boolean).length ?? 0;
-            const readTime = Math.max(1, Math.ceil(wordCount / 200));
+            // 按**非空白字符数**算，而不是按空格分词 —— 中文没有空格，
+            // 分词的结果是「段落数」，对中文书毫无意义。
+            const charCount = ch.content?.replace(/\s/g, "").length ?? 0;
+            const readTime = Math.max(1, Math.ceil(charCount / 300));
             const level = Math.min(ch.level ?? 0, 2);
             const indent = level * 16; // px indentation per level
             const levelLabel = levelLabels[level] ?? "";
@@ -131,10 +134,10 @@ export function ChapterPanel({
                     {levelLabel && (
                       <span className="mr-1 opacity-40">{levelLabel}</span>
                     )}
-                    {ch.title || `Chapter ${ch.indexOrder + 1}`}
+                    {ch.title || `第 ${ch.indexOrder + 1} 章`}
                   </p>
                   <p className="text-[10px] text-muted mt-0.5" style={{ marginLeft: level > 0 ? "0px" : "0px" }}>
-                    {wordCount.toLocaleString()} words · ~{readTime} min
+                    {charCount.toLocaleString()} 字 · 约 {readTime} 分钟
                   </p>
                 </div>
               </button>

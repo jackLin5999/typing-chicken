@@ -1,7 +1,7 @@
 import { useEffect, useRef, useCallback } from "react";
 import type { MutableRefObject } from "react";
-import { useSettingsStore, useTypingStore } from "@/store";
-import { isAutoSkipped, isPunctuation } from "@/lib/utils";
+import { useSettingsStore, useTypingStore, currentSkipPunctuation } from "@/store";
+import { isAutoSkipped, isPunctuation, isWhitespace } from "@/lib/utils";
 
 export interface TypingEngineOptions {
   /**
@@ -26,9 +26,8 @@ export function useTypingEngine(options: TypingEngineOptions = {}) {
   const {
     isActive,
     isPaused,
-    targetText,
-    cursorIndex,
     hasStarted,
+    isComplete,
     updateStats,
   } = useTypingStore();
 
@@ -48,6 +47,15 @@ export function useTypingEngine(options: TypingEngineOptions = {}) {
   useEffect(() => {
     // The clock only runs once the user has actually typed something.
     // Opening a book no longer starts the timer — see `hasStarted`.
+    //
+    // 也必须停在这一章打完的那一刻：会话在结算界面弹出后仍然是 active 的
+    // （要等用户按 ESC 才结束），时钟若继续跑，用时就会一直涨，
+    // 而 wordsCompleted 已经不动了 —— WPM = 词数/时间 于是**越看越低**，
+    // 用户会以为自己的成绩在缩水。
+    if (isComplete) {
+      return;
+    }
+
     if (isActive && !isPaused && hasStarted) {
       if (startTimeRef.current === 0) {
         // First keystroke: start the clock. Any pause taken before the first
@@ -85,7 +93,7 @@ export function useTypingEngine(options: TypingEngineOptions = {}) {
         timerRef.current = null;
       }
     };
-  }, [isActive, isPaused, hasStarted, updateStats]);
+  }, [isActive, isPaused, hasStarted, isComplete, updateStats]);
 
   // Reset the clock whenever the session ends or is restarted.
   // Keyed on `hasStarted` rather than `isActive` so that restarting an
@@ -131,7 +139,10 @@ export function useTypingEngine(options: TypingEngineOptions = {}) {
 
   // ── Auto-skip ─────────────────────────────────────────────────────────
 
-  const skipPunctuation = useSettingsStore((s) => s.skipPunctuation);
+  const globalSkipPunctuation = useSettingsStore((s) => s.skipPunctuation);
+  const skipPunctuationOverride = useTypingStore((s) => s.skipPunctuationOverride);
+  /** 本次会话真正生效的值：会话覆盖优先于全局设置。 */
+  const skipPunctuation = skipPunctuationOverride ?? globalSkipPunctuation;
 
   /**
    * Walk the cursor over everything the user is not asked to type at its
@@ -145,7 +156,7 @@ export function useTypingEngine(options: TypingEngineOptions = {}) {
    * stable callback however often the toggle flips.
    */
   const skipAutoSkippable = useCallback(() => {
-    const skipPunct = useSettingsStore.getState().skipPunctuation;
+    const skipPunct = currentSkipPunctuation();
     let state = useTypingStore.getState();
     let expected = state.targetText[state.cursorIndex];
     while (isAutoSkipped(expected, skipPunct)) {
@@ -157,6 +168,9 @@ export function useTypingEngine(options: TypingEngineOptions = {}) {
 
   // Turning 跳过标点 on moves the cursor off whatever mark it was about to ask
   // for, instead of leaving the highlight there until the next keystroke.
+  //
+  // 依赖的是**生效值**而不是全局设置：课程里改的是会话覆盖，
+  // 全局设置整个会话都没变过，只看它的话这个 effect 永远不会重跑。
   useEffect(() => {
     if (skipPunctuation) skipAutoSkippable();
   }, [skipPunctuation, skipAutoSkippable]);
@@ -181,7 +195,8 @@ export function useTypingEngine(options: TypingEngineOptions = {}) {
     // Newlines (\n from Enter key) trigger a whitespace-skip only.
     for (const char of value) {
       let state = useTypingStore.getState();
-      if (!state.isActive || state.isPaused) break;
+      // 打完就冻结：settlement 界面还开着时敲键不该再改动成绩
+      if (!state.isActive || state.isPaused || state.isComplete) break;
 
       let expected = state.targetText[state.cursorIndex];
       if (expected === undefined) break; // reached end of text
@@ -198,7 +213,7 @@ export function useTypingEngine(options: TypingEngineOptions = {}) {
 
       // 跳过标点: a mark typed out of habit is dropped instead of being scored
       // against the next character — the cursor is already past it.
-      if (useSettingsStore.getState().skipPunctuation && isPunctuation(char)) continue;
+      if (currentSkipPunctuation() && isPunctuation(char)) continue;
 
       if (expected === undefined) break;
 
@@ -254,17 +269,20 @@ export function useTypingEngine(options: TypingEngineOptions = {}) {
         if (isComposingRef.current) return;
 
         const state = useTypingStore.getState();
-        if (!state.isActive || state.isPaused) return;
+        if (!state.isActive || state.isPaused || state.isComplete) return;
 
-        // Clear anything auto-skipped the cursor is resting on (a mark it
-        // backed onto, say) so this press is spent on a real character.
-        skipAutoSkippable();
+        // 光标停在空白上（恢复进度后可能如此）—— 这一下就先把它清掉。
+        // 不要再顺手吃掉后面那个真字符：那会让「按一次跳过两个」，
+        // 而且只在光标刚好落在空白之前时才发生，感觉像随机。
+        if (isWhitespace(state.targetText[state.cursorIndex])) {
+          skipAutoSkippable();
+          return;
+        }
 
-        // Skip current character as correct (auto-input)
+        // 只跳过光标下这一个字符。后面若跟着空白，留给下一次击键去走
+        // （`handleInput` 开头就会自动清掉）—— 一次按键 = 一个字符，
+        // 位置完全可预期。
         useTypingStore.getState().advanceCursor(true);
-
-        // Then run up to the next character that has to be typed
-        skipAutoSkippable();
         return;
       }
 
@@ -274,7 +292,7 @@ export function useTypingEngine(options: TypingEngineOptions = {}) {
         if (isComposingRef.current) return;
 
         const state = useTypingStore.getState();
-        if (!state.isActive || state.isPaused) return;
+        if (!state.isActive || state.isPaused || state.isComplete) return;
 
         // Jump to the next character the user has to type — this is how a
         // paragraph break (and, in 跳过标点 mode, a run of marks) is crossed.
@@ -334,9 +352,6 @@ export function useTypingEngine(options: TypingEngineOptions = {}) {
   // Completion is now detected in advanceCursor (typingSlice) → sets isComplete: true.
   // The ReaderPage shows a completion summary; session stays active until the
   // user presses Escape or manually exits.
-
-  // Derived from store for convenience
-  const isComplete = cursorIndex >= targetText.length && targetText.length > 0;
 
   return { inputRef: setInputRef, handleInput, handleCompositionStart, handleCompositionEnd, handleBlur, handleKeydown, isComplete };
 }

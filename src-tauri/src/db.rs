@@ -26,6 +26,23 @@ pub struct NewChapter<'a> {
     pub level: i32,
 }
 
+/// 一次练习的结果。书名和章节名冗余存一份 —— 书删了历史也还读得懂。
+pub struct NewSession<'a> {
+    pub book_id: &'a str,
+    pub book_title: &'a str,
+    pub chapter_index: i32,
+    pub chapter_title: &'a str,
+    pub wpm: f64,
+    pub accuracy: f64,
+    pub duration_seconds: i32,
+    pub correct_keystrokes: i32,
+    pub total_keystrokes: i32,
+    pub incorrect_chars: i32,
+    pub words_completed: f64,
+    /// 错字重练产生的记录，与正常章节练习区分开
+    pub is_drill: bool,
+}
+
 impl Database {
     /// Open (or create) the SQLite database and run migrations.
     pub fn new(db_path: &Path) -> Result<Self> {
@@ -74,6 +91,41 @@ impl Database {
             CREATE TABLE IF NOT EXISTS settings (
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
+            );
+
+            -- 每次练完一章记一行，用来画进步曲线。
+            -- 刻意**不加外键**：书被删掉之后历史仍然该留着，
+            -- 所以书名/章节名都冗余存一份，统计页不依赖 books 表。
+            CREATE TABLE IF NOT EXISTS sessions (
+                id                 TEXT PRIMARY KEY,
+                book_id            TEXT NOT NULL,
+                book_title         TEXT NOT NULL DEFAULT '',
+                chapter_index      INTEGER NOT NULL DEFAULT 0,
+                chapter_title      TEXT NOT NULL DEFAULT '',
+                wpm                REAL NOT NULL DEFAULT 0,
+                accuracy           REAL NOT NULL DEFAULT 0,
+                duration_seconds   INTEGER NOT NULL DEFAULT 0,
+                correct_keystrokes INTEGER NOT NULL DEFAULT 0,
+                total_keystrokes   INTEGER NOT NULL DEFAULT 0,
+                incorrect_chars    INTEGER NOT NULL DEFAULT 0,
+                words_completed    REAL NOT NULL DEFAULT 0,
+                is_drill           INTEGER NOT NULL DEFAULT 0,
+                created_at         TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_sessions_created
+                ON sessions(created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_sessions_book
+                ON sessions(book_id, created_at DESC);
+
+            -- 指法课程的进度。`completed_at` 非空 = 这一课通过了达标线。
+            -- 课程编号与目标线都在前端（src/lib/lessons.ts），这边只存结果。
+            CREATE TABLE IF NOT EXISTS lessons (
+                id            TEXT PRIMARY KEY,
+                attempts      INTEGER NOT NULL DEFAULT 0,
+                best_accuracy REAL NOT NULL DEFAULT 0,
+                best_wpm      REAL NOT NULL DEFAULT 0,
+                completed_at  TEXT
             );
             ",
         )?;
@@ -298,6 +350,141 @@ impl Database {
         Ok(())
     }
 
+    // ── Practice sessions ─────────────────────────────────────────────
+
+    /// Append one finished practice session. Returns the new row's id.
+    pub fn insert_session(&self, s: &NewSession<'_>) -> Result<String> {
+        let id = uuid::Uuid::new_v4().to_string();
+        self.conn.execute(
+            "INSERT INTO sessions (id, book_id, book_title, chapter_index, chapter_title,
+                                   wpm, accuracy, duration_seconds, correct_keystrokes,
+                                   total_keystrokes, incorrect_chars, words_completed, is_drill)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            rusqlite::params![
+                id,
+                s.book_id,
+                s.book_title,
+                s.chapter_index,
+                s.chapter_title,
+                s.wpm,
+                s.accuracy,
+                s.duration_seconds,
+                s.correct_keystrokes,
+                s.total_keystrokes,
+                s.incorrect_chars,
+                s.words_completed,
+                s.is_drill as i32,
+            ],
+        )?;
+        Ok(id)
+    }
+
+    /// Most recent sessions first. `book_id` narrows it to one book.
+    pub fn get_sessions(
+        &self,
+        limit: i32,
+        book_id: Option<&str>,
+    ) -> Result<Vec<super::commands::storage::SessionEntry>> {
+        let map_row = |row: &rusqlite::Row<'_>| {
+            Ok(super::commands::storage::SessionEntry {
+                id: row.get(0)?,
+                book_id: row.get(1)?,
+                book_title: row.get(2)?,
+                chapter_index: row.get(3)?,
+                chapter_title: row.get(4)?,
+                wpm: row.get(5)?,
+                accuracy: row.get(6)?,
+                duration_seconds: row.get(7)?,
+                correct_keystrokes: row.get(8)?,
+                total_keystrokes: row.get(9)?,
+                incorrect_chars: row.get(10)?,
+                words_completed: row.get(11)?,
+                is_drill: row.get::<_, i32>(12)? != 0,
+                created_at: row.get(13)?,
+            })
+        };
+
+        const COLUMNS: &str = "id, book_id, book_title, chapter_index, chapter_title,
+                               wpm, accuracy, duration_seconds, correct_keystrokes,
+                               total_keystrokes, incorrect_chars, words_completed,
+                               is_drill, created_at";
+        let limit = limit.clamp(1, 2000);
+
+        match book_id {
+            Some(book) => {
+                let mut stmt = self.conn.prepare(&format!(
+                    "SELECT {COLUMNS} FROM sessions WHERE book_id = ?1
+                     ORDER BY created_at DESC LIMIT ?2"
+                ))?;
+                let rows = stmt.query_map(rusqlite::params![book, limit], map_row)?;
+                rows.collect()
+            }
+            None => {
+                let mut stmt = self.conn.prepare(&format!(
+                    "SELECT {COLUMNS} FROM sessions ORDER BY created_at DESC LIMIT ?1"
+                ))?;
+                let rows = stmt.query_map(rusqlite::params![limit], map_row)?;
+                rows.collect()
+            }
+        }
+    }
+
+    /// Wipe the practice history (the 统计页 的「清空」按钮）。
+    pub fn clear_sessions(&self) -> Result<()> {
+        self.conn.execute("DELETE FROM sessions", [])?;
+        Ok(())
+    }
+
+    // ── 指法课程进度 ────────────────────────────────────────────────────
+
+    pub fn get_lesson_progress(
+        &self,
+    ) -> Result<Vec<super::commands::storage::LessonProgress>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, attempts, best_accuracy, best_wpm, completed_at FROM lessons",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(super::commands::storage::LessonProgress {
+                id: row.get(0)?,
+                attempts: row.get(1)?,
+                best_accuracy: row.get(2)?,
+                best_wpm: row.get(3)?,
+                completed_at: row.get(4)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// 记一次上课结果。
+    ///
+    /// 最佳成绩只增不减；`completed_at` 一旦写上就不再改动 ——
+    /// 重练一次没达标，不该把「已通过」的标记抹掉。
+    pub fn record_lesson_result(
+        &self,
+        id: &str,
+        accuracy: f64,
+        wpm: f64,
+        passed: bool,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO lessons (id, attempts, best_accuracy, best_wpm, completed_at)
+             VALUES (?1, 1, ?2, ?3, CASE WHEN ?4 THEN datetime('now') ELSE NULL END)
+             ON CONFLICT(id) DO UPDATE SET
+                 attempts      = attempts + 1,
+                 best_accuracy = MAX(best_accuracy, excluded.best_accuracy),
+                 best_wpm      = MAX(best_wpm, excluded.best_wpm),
+                 completed_at  = COALESCE(lessons.completed_at, excluded.completed_at)",
+            rusqlite::params![id, accuracy, wpm, passed as i32],
+        )?;
+        Ok(())
+    }
+
+    /// 「重新开始课程」用。
+    pub fn clear_lesson_progress(&self) -> Result<()> {
+        self.conn.execute("DELETE FROM lessons", [])?;
+        Ok(())
+    }
+
     pub fn delete_book(&self, book_id: &str) -> Result<()> {
         self.conn
             .execute("DELETE FROM chapters WHERE book_id = ?1", rusqlite::params![book_id])?;
@@ -340,6 +527,140 @@ mod tests {
             settings.get("convertToSimplified").map(String::as_str),
             Some("false")
         );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn sample_session<'a>(book_id: &'a str, title: &'a str, wpm: f64) -> NewSession<'a> {
+        NewSession {
+            book_id,
+            book_title: "测试书",
+            chapter_index: 0,
+            chapter_title: title,
+            wpm,
+            accuracy: 96.5,
+            duration_seconds: 61,
+            correct_keystrokes: 200,
+            total_keystrokes: 210,
+            incorrect_chars: 7,
+            words_completed: 40.0,
+            is_drill: false,
+        }
+    }
+
+    #[test]
+    fn sessions_round_trip_and_survive_reopening() {
+        let dir = std::env::temp_dir().join(format!("daziji-sessions-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("test.db");
+
+        {
+            let db = Database::new(&db_path).unwrap();
+            assert!(db.get_sessions(500, None).unwrap().is_empty());
+
+            db.insert_session(&sample_session("book-a", "第一章", 42.0)).unwrap();
+            db.insert_session(&sample_session("book-a", "第二章", 55.0)).unwrap();
+            db.insert_session(&sample_session("book-b", "别的一章", 30.0)).unwrap();
+
+            // 最近的在最前 —— created_at 精度只到秒，同一秒内插入时靠这层保证顺序
+            // 不强求，所以这里只断言**集合**而不是顺序。
+            let all = db.get_sessions(500, None).unwrap();
+            assert_eq!(all.len(), 3);
+
+            // 按书过滤
+            let book_a = db.get_sessions(500, Some("book-a")).unwrap();
+            assert_eq!(book_a.len(), 2);
+            assert!(book_a.iter().all(|s| s.book_id == "book-a"));
+
+            // limit 生效；再断言读回来的字段没串位
+            let one = db.get_sessions(1, Some("book-a")).unwrap();
+            assert_eq!(one.len(), 1);
+            assert_eq!(one[0].chapter_title, "第一章");
+            assert_eq!(one[0].accuracy, 96.5);
+            assert_eq!(one[0].total_keystrokes, 210);
+            assert!(!one[0].is_drill);
+        }
+
+        // 「练过的都还在」= 关掉再打开仍然读得到
+        let reopened = Database::new(&db_path).unwrap();
+        assert_eq!(reopened.get_sessions(500, None).unwrap().len(), 3);
+
+        reopened.clear_sessions().unwrap();
+        assert!(reopened.get_sessions(500, None).unwrap().is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn lesson_progress_keeps_the_best_and_never_unpasses() {
+        let dir = std::env::temp_dir().join(format!("daziji-lessons-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir.join("test.db")).unwrap();
+
+        assert!(db.get_lesson_progress().unwrap().is_empty());
+
+        // 第一次：没过
+        db.record_lesson_result("1-1", 80.0, 12.0, false).unwrap();
+        let first = db.get_lesson_progress().unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].attempts, 1);
+        assert!(first[0].completed_at.is_none(), "没达标不该标成通过");
+
+        // 第二次：过了
+        db.record_lesson_result("1-1", 97.5, 25.0, true).unwrap();
+        let second = db.get_lesson_progress().unwrap();
+        assert_eq!(second[0].attempts, 2);
+        assert_eq!(second[0].best_accuracy, 97.5);
+        assert_eq!(second[0].best_wpm, 25.0);
+        assert!(second[0].completed_at.is_some());
+
+        // 第三次：发挥失常 —— 最佳成绩只增不减，通过标记也不能被抹掉
+        db.record_lesson_result("1-1", 70.0, 9.0, false).unwrap();
+        let third = db.get_lesson_progress().unwrap();
+        assert_eq!(third[0].attempts, 3);
+        assert_eq!(third[0].best_accuracy, 97.5, "最佳成绩不该被更差的一次拉低");
+        assert_eq!(third[0].best_wpm, 25.0);
+        assert!(
+            third[0].completed_at.is_some(),
+            "重练没达标不该把「已通过」抹掉"
+        );
+
+        db.clear_lesson_progress().unwrap();
+        assert!(db.get_lesson_progress().unwrap().is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn deleting_a_book_keeps_its_practice_history() {
+        // 历史刻意不做外键级联：删掉书不该顺手抹掉「我练过多少次」。
+        let dir = std::env::temp_dir().join(format!("daziji-keep-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::new(&dir.join("test.db")).unwrap();
+
+        db.insert_book_with_chapters(
+            &NewBook {
+                id: "book-a",
+                title: "会被删掉的书",
+                author: "某人",
+                file_path: "/tmp/x.epub",
+                file_type: "epub",
+                chapter_count: 0,
+                total_words: 0,
+                cover_image: None,
+                source_id: None,
+            },
+            &[],
+        )
+        .unwrap();
+
+        db.insert_session(&sample_session("book-a", "第一章", 42.0)).unwrap();
+        db.delete_book("book-a").unwrap();
+
+        assert!(db.get_all_books().unwrap().is_empty(), "书应该没了");
+        let history = db.get_sessions(500, None).unwrap();
+        assert_eq!(history.len(), 1, "练习历史应该留着");
+        assert_eq!(history[0].book_title, "测试书");
 
         std::fs::remove_dir_all(&dir).ok();
     }

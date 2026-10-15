@@ -45,9 +45,15 @@ const CharSpan = memo(function CharSpan({
 }: CharSpanProps) {
   if (char === "\n") {
     return (
-      <span>
-        <br />
+      <span className="relative" data-char-index={index}>
+        {/*
+          光标必须画在 <br/> **之前**。
+          画在之后的话它就落在下一行的行首 —— 用户刚打完一行，
+          看到光标「自己跳下去了」，敲一下键才恢复正常。
+          换行也是「当前位置」，画在行尾才是诚实的。
+        */}
         {state === "current" && <Cursor />}
+        <br />
       </span>
     );
   }
@@ -289,7 +295,17 @@ export function TextDisplay({
     };
   }, [targetText, cursorIndex, showPinyin]);
 
-  const effectiveLineHeight = showPinyin
+  /**
+   * 正文里有没有汉字。
+   *
+   * 拼音相关的排版（字距、行高）只对中文有意义 —— 指法课程全是英文，
+   * 但全局的「拼音」开关是开着的，于是 0.28em 的字距被无差别套了上去，
+   * `give why part` 被撑成 `g i v e  w h y`，看着像坏了。
+   */
+  const hasCjk = useMemo(() => /[㐀-鿿]/.test(targetText), [targetText]);
+  const pinyinLayout = showPinyin && hasCjk;
+
+  const effectiveLineHeight = pinyinLayout
     ? Math.max(lineHeight, 2.0)
     : lineHeight;
 
@@ -362,7 +378,7 @@ export function TextDisplay({
       `}
       style={{
         lineHeight: effectiveLineHeight,
-        letterSpacing: showPinyin ? "0.28em" : undefined,
+        letterSpacing: pinyinLayout ? "0.28em" : undefined,
       }}
     >
       {/* Hidden textarea — captures all keyboard input including IME */}

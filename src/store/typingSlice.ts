@@ -20,9 +20,14 @@ interface TypingState {
   cursorIndex: number;
   /** Positions (indices) where the user typed the wrong character. */
   incorrectIndices: number[];
+  /**
+   * 本次会话对「跳过标点」的覆盖。null = 跟随全局设置。
+   * 指法课程传 false —— 标点课不能被全局设置悄悄跳过。
+   */
+  skipPunctuationOverride: boolean | null;
 
   // Actions
-  startSession: (text: string) => void;
+  startSession: (text: string, options?: { skipPunctuation?: boolean }) => void;
   pauseSession: () => void;
   resumeSession: () => void;
   endSession: () => void;
@@ -38,6 +43,11 @@ interface TypingState {
   backspace: () => void;
   setCursorIndex: (index: number) => void;
   setIncorrectIndices: (indices: number[]) => void;
+  /**
+   * 改本次会话的「跳过标点」覆盖值。传 null 表示回到跟随全局设置。
+   * 课程工具栏用它 —— 只影响这一节课，不动阅读时的全局开关。
+   */
+  setSkipPunctuationOverride: (value: boolean | null) => void;
 }
 
 /**
@@ -61,9 +71,29 @@ function skipMarkersAt(text: string, index: number): number {
   return idx;
 }
 
-/** Read the 跳过标点 flag at call time, so a mid-session toggle applies at once. */
-function skipPunctuation(): boolean {
-  return useSettingsStore.getState().skipPunctuation;
+/**
+ * 本次会话到底跳不跳标点。
+ *
+ * 优先用会话级的覆盖值：**指法课程会把它强制设为 false** ——
+ * 第 5 单元教的正是标点，用户若开着全局的「跳过标点」，
+ * 那一课会把自己要教的东西全部自动跳过，等于白上。
+ *
+ * 覆盖值为 null 时回落到全局设置（每次调用现读，中途改设置立刻生效）。
+ */
+function effectiveSkipPunctuation(override: boolean | null): boolean {
+  return override ?? useSettingsStore.getState().skipPunctuation;
+}
+
+/**
+ * 当前会话生效的「跳过标点」。
+ *
+ * 打字引擎（`useTypingEngine`）也用它 —— 判断逻辑只能有一份，
+ * 否则切片和引擎会对「这次会话跳不跳标点」给出不同答案。
+ */
+export function currentSkipPunctuation(): boolean {
+  return effectiveSkipPunctuation(
+    useTypingStore.getState().skipPunctuationOverride,
+  );
 }
 
 /**
@@ -103,17 +133,23 @@ const INITIAL = {
   targetText: "",
   cursorIndex: 0,
   incorrectIndices: [] as number[],
+  skipPunctuationOverride: null as boolean | null,
 };
 
 export const useTypingStore = create<TypingState>((set) => ({
   ...INITIAL,
 
-  startSession: (text) =>
+  startSession: (text, options) =>
     set({
       ...INITIAL,
+      skipPunctuationOverride: options?.skipPunctuation ?? null,
       isActive: true,
       targetText: text,
-      cursorIndex: landingIndex(text, 0, skipPunctuation()),
+      cursorIndex: landingIndex(
+        text,
+        0,
+        effectiveSkipPunctuation(options?.skipPunctuation ?? null),
+      ),
     }),
 
   pauseSession: () => set({ isPaused: true }),
@@ -127,7 +163,11 @@ export const useTypingStore = create<TypingState>((set) => ({
       // Skipping punctuation here (rather than waiting for the next keystroke)
       // is what lets a chapter that ends in 「。」 still complete on its last
       // real character.
-      const newIndex = landingIndex(s.targetText, rawIndex, skipPunctuation());
+      const newIndex = landingIndex(
+        s.targetText,
+        rawIndex,
+        effectiveSkipPunctuation(s.skipPunctuationOverride),
+      );
       const total = s.stats.totalKeystrokes + 1;
       const correctTotal = s.stats.correctKeystrokes + (correct ? 1 : 0);
       const ch = s.targetText[s.cursorIndex];
@@ -178,7 +218,7 @@ export const useTypingStore = create<TypingState>((set) => ({
       const charAtPrev = s.targetText[prevIdx];
 
       // Auto-skipped characters were never a keystroke — nothing to revert
-      if (isAutoSkipped(charAtPrev, skipPunctuation())) {
+      if (isAutoSkipped(charAtPrev, effectiveSkipPunctuation(s.skipPunctuationOverride))) {
         return {
           cursorIndex: prevIdx,
           incorrectIndices: s.incorrectIndices.filter((i) => i < prevIdx),
@@ -218,7 +258,11 @@ export const useTypingStore = create<TypingState>((set) => ({
     set((s) => {
       // Restored progress can land on punctuation that 跳过标点 now travels
       // over — step to the first character the user actually has to type.
-      const cursorIndex = landingIndex(s.targetText, index, skipPunctuation());
+      const cursorIndex = landingIndex(
+        s.targetText,
+        index,
+        effectiveSkipPunctuation(s.skipPunctuationOverride),
+      );
       return {
         cursorIndex,
         incorrectIndices: s.incorrectIndices.filter((i) => i < cursorIndex),
@@ -227,4 +271,7 @@ export const useTypingStore = create<TypingState>((set) => ({
 
   setIncorrectIndices: (indices) =>
     set({ incorrectIndices: indices }),
+
+  setSkipPunctuationOverride: (value) =>
+    set({ skipPunctuationOverride: value }),
 }));

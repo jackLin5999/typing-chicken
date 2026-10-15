@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { Minus, Square, Copy, X, BookMarked, Library } from "lucide-react";
+import { Minus, Square, Copy, X, BookMarked, Keyboard, Library, BarChart3 } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 /**
@@ -14,10 +14,12 @@ export function Titlebar() {
   const navigate = useNavigate();
   const { pathname } = useLocation();
 
-  /** Left-hand page nav: 书架 (/) and 书库 (/browse). */
+  /** Left-hand page nav. 课程排在书架前面 —— 它是新用户的第一步。 */
   const navItems = [
+    { to: "/lessons", label: "课程", Icon: Keyboard },
     { to: "/", label: "书架", Icon: Library },
     { to: "/browse", label: "书库", Icon: BookMarked },
+    { to: "/stats", label: "统计", Icon: BarChart3 },
   ];
 
   const handleMinimize = async () => {
@@ -117,7 +119,8 @@ export function Titlebar() {
             rounded transition-colors cursor-pointer
           "
           style={{ pointerEvents: "auto", cursor: "pointer" }}
-          aria-label="Minimize"
+          aria-label="最小化"
+          title="最小化"
         >
           <Minus size={14} />
         </button>
@@ -131,7 +134,8 @@ export function Titlebar() {
             rounded transition-colors cursor-pointer
           "
           style={{ pointerEvents: "auto", cursor: "pointer" }}
-          aria-label={isMaximized ? "Restore" : "Maximize"}
+          aria-label={isMaximized ? "还原" : "最大化"}
+          title={isMaximized ? "还原" : "最大化"}
         >
           {isMaximized ? <Copy size={12} /> : <Square size={12} />}
         </button>
@@ -145,7 +149,8 @@ export function Titlebar() {
             rounded transition-colors cursor-pointer
           "
           style={{ pointerEvents: "auto", cursor: "pointer" }}
-          aria-label="Close"
+          aria-label="关闭"
+          title="关闭"
         >
           <X size={14} />
         </button>

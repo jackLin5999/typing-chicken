@@ -1,12 +1,22 @@
-import { Trophy, ArrowRight, Home, RotateCcw } from "lucide-react";
-import { useTypingStore } from "@/store";
+import { Trophy, ArrowRight, Home, RotateCcw, Target } from "lucide-react";
 import { formatTime } from "@/lib/utils";
+import type { TypingStats } from "@/types/typing";
 
 interface CompletionSummaryProps {
+  /**
+   * 完成那一刻的成绩快照，由 ReaderPage 捕获后传进来 —— 不直接读 store，
+   * 否则会话结束前的任何改动都会改到屏幕上的数字。
+   */
+  stats: TypingStats;
   hasNextChapter: boolean;
   onNextChapter: () => void;
   onBackToLibrary: () => void;
   onRestart: () => void;
+  /** 这一遍是错字重练，而不是把整章过了一遍。 */
+  isDrill: boolean;
+  /** 本章打错的**不同**字符数（0 表示全对，不显示重练入口）。 */
+  mistakeCount: number;
+  onRetryMistakes: () => void;
 }
 
 /**
@@ -14,18 +24,20 @@ interface CompletionSummaryProps {
  * Displays session stats — WPM, accuracy, time, keystrokes.
  */
 export function CompletionSummary({
+  stats,
   hasNextChapter,
   onNextChapter,
   onBackToLibrary,
   onRestart,
+  isDrill,
+  mistakeCount,
+  onRetryMistakes,
 }: CompletionSummaryProps) {
-  const stats = useTypingStore((s) => s.stats);
-
   const rows: { label: string; value: string }[] = [
-    { label: "WPM", value: stats.wpm.toString() },
-    { label: "Accuracy", value: `${stats.accuracy}%` },
-    { label: "Time", value: formatTime(stats.elapsedSeconds) },
-    { label: "Keystrokes", value: `${stats.correctKeystrokes} / ${stats.totalKeystrokes}` },
+    { label: "速度", value: `${stats.wpm}` },
+    { label: "准确率", value: `${stats.accuracy}%` },
+    { label: "用时", value: formatTime(stats.elapsedSeconds) },
+    { label: "击键", value: `${stats.correctKeystrokes} / ${stats.totalKeystrokes}` },
   ];
 
   return (
@@ -37,10 +49,10 @@ export function CompletionSummary({
             <Trophy size={28} className="text-accent" />
           </div>
           <h2 className="text-lg font-bold text-ink font-serif">
-            Chapter Complete!
+            {isDrill ? "重练完成！" : "本章完成！"}
           </h2>
           <p className="text-xs text-muted">
-            Great work — here are your results
+            这是这一遍的成绩
           </p>
         </div>
 
@@ -51,7 +63,7 @@ export function CompletionSummary({
               key={row.label}
               className="flex flex-col items-center gap-0.5 p-3 rounded-xl bg-surface-alt"
             >
-              <span className="text-[10px] tracking-[0.15em] uppercase text-muted font-medium">
+              <span className="text-[10px] tracking-[0.15em] text-muted font-medium">
                 {row.label}
               </span>
               <span className="text-xl font-bold text-ink tabular-nums">
@@ -63,15 +75,28 @@ export function CompletionSummary({
 
         {/* Actions */}
         <div className="px-6 pb-6 pt-2 flex flex-col gap-2">
+          {/* 只在真的打错了、且还没在重练里时出现 */}
+          {mistakeCount > 0 && !isDrill && (
+            <button
+              onClick={onRetryMistakes}
+              className="flex items-center justify-center gap-2 w-full py-2.5 rounded-xl
+                bg-accent/10 text-accent text-sm font-semibold
+                hover:bg-accent/15 transition-colors cursor-pointer"
+            >
+              <Target size={16} />
+              重练错字（{mistakeCount} 处）
+            </button>
+          )}
+
           {hasNextChapter && (
             <button
               onClick={onNextChapter}
               className="flex items-center justify-center gap-2 w-full py-2.5 rounded-xl
                 bg-accent text-white text-sm font-semibold
-                hover:bg-blue-600 active:bg-blue-700 transition-colors shadow-sm"
+                hover:bg-blue-600 active:bg-blue-700 transition-colors shadow-sm cursor-pointer"
             >
               <ArrowRight size={16} />
-              Next Chapter
+              下一章
             </button>
           )}
           <div className="flex gap-2">
@@ -79,19 +104,19 @@ export function CompletionSummary({
               onClick={onRestart}
               className="flex-1 flex items-center justify-center gap-1.5 py-2.5 rounded-xl
                 bg-surface-alt text-ink text-sm font-medium
-                hover:bg-surface-hover transition-colors"
+                hover:bg-surface-hover transition-colors cursor-pointer"
             >
               <RotateCcw size={14} />
-              Restart
+              重来
             </button>
             <button
               onClick={onBackToLibrary}
               className="flex-1 flex items-center justify-center gap-1.5 py-2.5 rounded-xl
                 bg-surface-alt text-ink text-sm font-medium
-                hover:bg-surface-hover transition-colors"
+                hover:bg-surface-hover transition-colors cursor-pointer"
             >
               <Home size={14} />
-              Library
+              书架
             </button>
           </div>
         </div>
