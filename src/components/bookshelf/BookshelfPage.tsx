@@ -145,8 +145,8 @@ export function BookshelfPage() {
           <div className="w-20 h-20 rounded-full bg-accent/20 flex items-center justify-center">
             <Upload size={36} className="text-accent" />
           </div>
-          <p className="text-lg font-semibold text-accent">Drop files or a folder to import</p>
-          <p className="text-sm text-muted">EPUB</p>
+          <p className="text-lg font-semibold text-accent">松手即可导入</p>
+          <p className="text-sm text-muted">支持 EPUB 文件或整个文件夹</p>
         </div>
       )}
 
@@ -155,12 +155,12 @@ export function BookshelfPage() {
         <div className="flex items-center justify-between mb-10">
           <div>
             <h1 className="text-2xl font-bold text-ink font-serif tracking-tight">
-              Library
+              书架
             </h1>
             <p className="text-sm text-muted mt-1">
               {books.length === 0
-                ? "Import a book to start typing"
-                : `${books.length} book${books.length === 1 ? "" : "s"} in your library`}
+                ? "导入一本书就能开始练了"
+                : `共 ${books.length} 本`}
             </p>
           </div>
 
@@ -172,7 +172,7 @@ export function BookshelfPage() {
                 hover:bg-blue-600 active:bg-blue-700 transition-colors shadow-sm"
             >
               <Plus size={16} />
-              Import Book
+              导入书籍
             </button>
           )}
         </div>
@@ -184,8 +184,8 @@ export function BookshelfPage() {
             <p className="flex-1 text-sm text-ink leading-relaxed">{importError}</p>
             <button
               onClick={() => setImportError(null)}
-              aria-label="Dismiss"
-              className="shrink-0 rounded p-0.5 text-muted hover:text-ink transition-colors"
+              aria-label="关闭"
+              className="shrink-0 rounded p-0.5 text-muted hover:text-ink transition-colors cursor-pointer"
             >
               <X size={16} />
             </button>
@@ -263,7 +263,7 @@ export function BookshelfPage() {
                 className="text-gray-300 dark:text-gray-600 group-hover:text-accent transition-colors"
               />
               <span className="text-xs text-muted group-hover:text-accent transition-colors">
-                Add Book
+                导入书籍
               </span>
             </button>
           </div>

@@ -53,10 +53,10 @@ export function ImportZone() {
 
       <div className="text-center space-y-1">
         <p className="text-sm font-medium text-ink">
-          Import your first book
+          导入第一本书
         </p>
         <p className="text-xs text-muted">
-          EPUB
+          支持 EPUB · 也可以直接拖进来
         </p>
       </div>
     </button>

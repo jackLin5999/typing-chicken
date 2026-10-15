@@ -126,7 +126,8 @@ export function BookCard({ book, onClick, onDelete }: BookCardProps) {
           transition-all duration-150
           cursor-pointer
         "
-        aria-label="Delete book"
+        aria-label="删除这本书"
+        title="删除这本书"
       >
         <Trash2 size={11} />
       </button>
